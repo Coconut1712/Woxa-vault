@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm -v)",
+      "Bash(brew list *)",
+      "Read(//Library/**)",
+      "Read(//opt/homebrew/opt/**)",
+      "Bash(timeout 25 npm run dev)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:3000/)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:3000/login/password)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:3000/app)",
+      "Bash(npx tsc *)",
+      "Bash(curl -s http://localhost:3000/login/password)",
+      "Bash(curl -s http://localhost:3000/app)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:8787/health)",
+      "Bash(curl -s -X POST http://localhost:8787/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"wrong@example.com\",\"password\":\"nope\"}' -i)",
+      "Bash(npm install *)",
+      "Bash(curl *)",
+      "Bash(echo \"exit code: $?\")",
+      "Bash(npm run *)",
+      "Bash(set -e)",
+      "Bash(pkill -f \"tsx watch src/server.ts\")",
+      "Bash(pkill -f \"tsx scripts/dev-pg.ts\")",
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Bash(lsof -nP -iTCP:5433 -sTCP:LISTEN)",
+      "Bash(lsof -nP -iTCP:5432 -sTCP:LISTEN)",
+      "Bash(lsof -nP -iTCP:8787 -sTCP:LISTEN)",
+      "Bash(docker exec *)",
+      "Read(//private/tmp/**)",
+      "Bash(rm -f /tmp/woxa-cookie.txt)",
+      "Read(//tmp/**)"
+    ]
+  }
+}

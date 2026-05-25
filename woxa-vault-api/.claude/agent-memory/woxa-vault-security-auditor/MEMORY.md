@@ -1,0 +1,5 @@
+- [Access-control helper map](access_control_helpers.md) — where item/org RBAC resolution lives and how the two role systems interact
+- [Audit events table shape](audit_events_schema.md) — targetId is free-text/non-unique; orgId is the real tenant pin
+- [Auth middleware stack](auth_middleware_stack.md) — requireAuth / requireTwoFactorEnrolled / requireVaultUnlocked / blockGuestWrites semantics
+- [Project phase + deferred risks](project_phase_status.md) — Phase A/A.5; KMS wrapping, RLS, explicit-deny grants deferred
+- [Audit metadata safety](audit_metadata_safety.md) — no secret values in audit rows; XSS-safe render; role_change audit insert is non-transactional

@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(npx --yes create-next-app@latest woxa-vault-web --typescript --tailwind --eslint --app --src-dir --import-alias \"@/*\" --use-npm --no-turbopack --yes)",
+      "Bash(npx --yes shadcn@latest init --yes --base-color neutral --css-variables)",
+      "Bash(npx --yes shadcn@latest init --help)",
+      "Bash(npx --yes shadcn@latest init -d --no-monorepo --force)",
+      "Bash(npx --yes shadcn@latest add button card input label badge avatar dropdown-menu dialog sheet separator tabs select checkbox switch tooltip command sonner alert skeleton textarea -y)",
+      "Bash(npm i *)",
+      "Bash(npm run *)",
+      "Bash(tee /tmp/dev-server.log)",
+      "Bash(curl -s -o /dev/null -w \"Welcome: %{http_code}\\\\n\" http://localhost:3000/)",
+      "Bash(curl -s -o /dev/null -w \"App dashboard: %{http_code}\\\\n\" http://localhost:3000/app)",
+      "Bash(curl -s -o /dev/null -w \"Vault page: %{http_code}\\\\n\" http://localhost:3000/app/vault/v_production)",
+      "Bash(curl -s -o /dev/null -w \"Item detail: %{http_code}\\\\n\" http://localhost:3000/app/item/i_aws_root)",
+      "Bash(curl -s -o /dev/null -w \"Sends list: %{http_code}\\\\n\" http://localhost:3000/app/sends)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "Bash(curl -s -o /dev/null -w \"Password page: %{http_code}\\\\n\" \"http://localhost:3000/login/password?email=test@example.com\")",
+      "Bash(curl -s -o /dev/null -w \"SSO page: %{http_code}\\\\n\" \"http://localhost:3000/login/sso?email=ching@iux24.com\")",
+      "Bash(curl -s -o /dev/null -w \"Dashboard: %{http_code}\\\\n\" http://localhost:3000/app)",
+      "Bash(curl -s -o /dev/null -w \"Sends: %{http_code}\\\\n\" http://localhost:3000/app/sends)",
+      "Bash(curl -s -o /dev/null -w \"Item: %{http_code}\\\\n\" http://localhost:3000/app/item/i_aws_root)",
+      "Bash(curl -s -o /dev/null -w \"Trash: %{http_code}\\\\n\" http://localhost:3000/app/trash)",
+      "Bash(npx --yes shadcn@latest add popover -y)",
+      "Bash(grep -n \">Search<\\\\|>Workspace<\\\\|>Add workspace<\\\\|>Workspace settings<\\\\|>Sign out<\\\\|>Vault unlocked<\\\\|>Account settings<\\\\|>Lock vault<\\\\|>No folders yet<\\\\|Search$\" /Users/woxa/Projects/Woxa-vault/woxa-vault-web/src/components/layout/sidebar.tsx)",
+      "Bash(grep -n \"Remove \\\\${invite.email}\\\\|aria-label=\" /Users/woxa/Projects/Woxa-vault/woxa-vault-web/src/components/members/invite-dialog.tsx)",
+      "Bash(npx tsc *)",
+      "Bash(grep -in \"guest\\\\|external\" /Users/woxa/Projects/Woxa-vault/woxa-vault-web/src/lib/i18n/translations.ts | head -15)",
+      "Read(//Users/woxa/Projects/Woxa-vault/woxa-vault-web/**)",
+      "Bash(sed -n '1,60p' src/app/app/page.tsx)"
+    ]
+  }
+}

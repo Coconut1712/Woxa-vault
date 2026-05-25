@@ -1,0 +1,29 @@
+- [API contract conventions](api-contract.md) — Error code names + cookie+CORS rules shared with the web frontend
+- [Project layout & runtime quirks](project-runtime.md) — Where the API lives, embedded-postgres fallback, ports
+- [Dev cookie proxy via Next rewrite](dev-cookie-proxy.md) — Why /api/* rewrite exists; cross-origin cookie drop in dev
+- [Vault/items schema + envelope crypto](vault-items-schema.md) — Migration 0001 tables, role text, itemCrypto helper, DEK zeroization
+- [Google SSO flow](google-sso.md) — Env vars, state cookie format, JIT provisioning + domain re-verification
+- [No DB-down fallback](feedback_no_db_fallback.md) — Don't add 503 handlers or embedded-pg failover for ECONNREFUSED in dev
+- [Sends feature decisions](sends-feature.md) — Phase A envelope encryption, raw token not stored, burn-guard 425 contract, AC mapping
+- [Attachments feature (round 3)](attachments-feature.md) — Migration 0003, local-FS storage adapter, MIME allow-list, envelope encryption per file
+- [Invitations feature (round 3)](invitations-feature.md) — Migration 0003 invitations table, no email transport yet, acceptUrl returned in body
+- [Account self-service + invite signup (round 5)](account-self-service.md) — Migration 0004 password_updated_at, /me routes, signup-and-accept flow, user_exists error
+- [Recovery-kit flow (round 6)](recovery-kit-flow.md) — Migration 0005 recovery_kit_* cols; removed POST /me/password; setup + regenerate + public reset-with-recovery; single-use; sessions cleared on reset
+- [Round-7 security hardening](round7-security-hardening.md) — Migration 0006 lower(email) + absolute_expires_at; TRUST_PROXY env; recovery-code checksum; Origin CSRF middleware; setup atomic-UPDATE
+- [Vault unlock endpoint (AC-055.8)](vault-unlock-endpoint.md) — POST /me/verify-password, Phase A UX gate, no session mutation, two-tier RL, new password_not_set 409 code
+- [Phase A.5 server-side vault lock](phase-a5-server-side-vault-lock.md) — Migration 0007 vault_unlocked_at; requireVaultUnlocked middleware; vault_locked 401; WARN-I/J/K/L
+- [Round 8 — Resend mailer + production 2FA](round8-mailer-and-2fa.md) — Migration 0008 user_mfa_backup_codes; /auth/2fa enroll/verify/login/disable; resend mailer + emailSent contract; login mfa_required branch
+- [Round-2 audit patches](round2-security-audit-patches.md) — F-01..F-09 + F-14 + env hardening; invariants future rounds must not regress; F-10/F-11/F-12 deferred TODOs in twoFactor.ts
+- [Single-Owner workspace model](single-owner-workspace.md) — Migration 0009 single-owner index; outranks() RBAC; POST /workspace create+transfer; /spaces onboarding; last_owner deprecated
+- [Migrations are hand-written](migration-history-handwritten.md) — drizzle-kit generate is broken (snapshot collision); hand-author 000N.sql + journal entry instead
+- [Round 9 — workspace/SSO audit](round9-workspace-sso-audit.md) — transfer-ownership now needs password (HIGH#1); SSO JIT no auto-join (HIGH#2); 409 ownership_transfer_conflict; isUniqueViolation helper
+- [Round 10 — 2FA replay audit](round10-2fa-replay-audit.md) — Migration 0010 last_totp_step CAS replay guard; KEK prod boot guard; verify-login IP bucket; 2FA change email
+- [Gotcha: @node-rs/argon2 const enum](gotcha-node-rs-argon2-const-enum.md) — Algorithm is ambient const enum; isolatedModules forbids member access; use `2 satisfies Algorithm`
+- [Require-2FA workspace policy](require-2fa-policy.md) — organizations.settings.require2fa; orgPolicy.ts; requireTwoFactorEnrolled guard on 6 secret routers; 403 two_factor_required; /me.requiresTwoFactorEnroll
+- [Two-password model + signup](two-password-model.md) — Migration 0011 login_password_hash; /auth/login verifies login (not master); new POST /auth/register; 409 email_taken
+- [verify-login error contract](verify-login-error-contract.md) — 401 mfa_session_expired (bad/expired token) vs invalid_credentials (wrong code); replay==wrong-code no-oracle invariant
+- [Active workspace model (M-1)](active-workspace-model.md) — Migration 0012 sessions.active_org_id; resolveActiveOrg + activeOrgForContext seam; POST /workspace/switch; all org-scoped call sites migrated
+- [Per-item activity endpoint](item-activity-endpoint.md) — GET /items/:id/activity, manager-or-item-org-admin auth, reuses exported toAuditDto; /audit unchanged
+- [Notifications system](notifications-feature.md) — Migration 0015; createNotification(tx) writer; share/role/revoke/member/send hooks; /notifications CRUD (requireAuth only)
+- [Workspace security-settings + SSO enforcement](workspace-security-settings-round.md) — orgPolicy.ts grew autoLock+sso sub-policy; full GET/PATCH /workspace/settings envelope; SSO domain/JIT cross-org gates; org_domains (AC-006.2) still not built
+- [Workspace slug auto-follows name](workspace-slug-auto-follow.md) — PATCH /workspace regenerates slug from new name; allocateSlug exclude-self; renameSchema name-only; 409 workspace_slug_conflict; slug never-trusted

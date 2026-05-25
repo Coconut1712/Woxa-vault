@@ -1,0 +1,39 @@
+-- Migration 0010: TOTP replay protection — users.last_totp_step (RFC 6238 §5.2).
+--
+-- Why:
+--   `verifyTotpCode` was stateless: a single 6-digit TOTP stays valid for the
+--   whole ±skew window (~60-90 s with window=1) and could be presented MORE
+--   THAN ONCE. RFC 6238 §5.2 mandates "the verifier MUST NOT accept the second
+--   attempt of the OTP after the successful validation". A capture-replay on
+--   /auth/2fa/verify-login could otherwise let an attacker who sniffed one code
+--   in transit mint a second session; the same gap let a replayed code drive
+--   /disable and /regenerate-backup-codes.
+--
+-- Semantics:
+--   * Holds the most recent TOTP time-step accepted for the user, shared across
+--     ALL TOTP entry points (enroll / disable / regenerate / login). A step is
+--     floor(unix_seconds / 30) adjusted by the matched ±skew delta.
+--   * Every TOTP success runs a monotonic compare-and-set:
+--       UPDATE users SET last_totp_step = $step
+--         WHERE id = $id AND (last_totp_step IS NULL OR last_totp_step < $step)
+--       RETURNING id;
+--     0 rows → the step (or an earlier step still inside the same code's
+--     validity window) was already consumed → reject as a replay.
+--   * NULL = no TOTP has ever been accepted for this user (new column default).
+--   * Backup-code logins do NOT touch this column — they carry their own
+--     single-use `used_at` marker in user_mfa_backup_codes.
+--
+-- Threat model:
+--   Asset: ability to satisfy the TOTP second factor more than once with one
+--     code. Adversary: a passive in-transit sniffer (capture-replay) or any
+--     code that lands twice. Mitigation: per-user monotonic CAS on this column,
+--     atomic in a single UPDATE so concurrent submissions of the same code
+--     race on the row and exactly one wins. Residual risk: bigint is generous
+--     headroom (current step ≈ 5.9e7; overflow is ~9.8 billion years out).
+--
+-- bigint (not integer): a 30-second step counter overflows int4 (2.1e9) in
+-- ~2038 in seconds-since-epoch terms only if stored as raw seconds; we store
+-- the step (seconds/30) which is comfortably small, but bigint future-proofs
+-- against any period change and matches drizzle `bigint({ mode: "number" })`.
+
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "last_totp_step" bigint;

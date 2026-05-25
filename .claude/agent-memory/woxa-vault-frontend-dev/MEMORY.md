@@ -1,0 +1,23 @@
+- [Auth wiring overview](project_auth_wiring.md) — where AuthProvider/SessionGuard/API client live and what they own
+- [Round-2 API scaffolding](project_api_scaffolding.md) — vaults/items/sso clients + which UI surfaces are live vs still mock
+- [API contract source of truth](reference_api_contract.md) — pointer to /API_CONTRACT.md for cross-agent agreements
+- [No background dev servers](feedback_no_background_dev_servers.md) — never leave `npm run dev` / `next dev` alive in background after a task
+- [Attachments + Members live wiring](project_attachments_and_members.md) — attachments/members API clients, AttachmentsSection ref API, members page rewrite, error code map
+- [Invitation accept flow](project_invitation_accept_flow.md) — /invite/[token] page, login `next` hop, error code → stage map
+- [Account settings + Recovery Kit](project_account_settings_wired.md) — /me endpoints, RecoveryKitModal, setup-password/forgot-password flows, missing-kit banner
+- [Vault lock overlay](project_vault_lock_overlay.md) — AC-055.8 idle/visibility/manual lock, sessionStorage timestamp, POST /me/verify-password
+- [Two-factor auth (TOTP)](project_two_factor_auth.md) — MFA login challenge, enroll/disable/regenerate flow, BackupCodesPanel, invite emailSent feedback
+- [SSO 2FA flow](project_sso_mfa_flow.md) — /login/mfa redeems HttpOnly mfa_pending cookie via verify-login body {code} (no mfaToken); 401 = terminal restart-SSO
+- [Welcome onboarding (/welcome)](project_welcome_onboarding.md) — email-first workspace discovery page, mock discoverWorkspace, onboarding.* keys, /setup wizard still pending
+- [Spaces workspace hub (/spaces)](project_spaces_workspace_hub.md) — post-auth create/select workspace, workspaces API client, needsWorkspaceSelection routing wall, spaces.* keys
+- [Workspace switcher + active-org switch](project_workspace_switcher.md) — sidebar WorkspaceSwitcher, POST /workspace/switch, me.activeOrgId, refresh+router.refresh after switch
+- [Require-2FA policy](project_require_2fa_policy.md) — workspace Require-2FA gate: SessionGuard rung, /setup-2fa wall, 403 two_factor_required safety net, live settings toggle
+- [Forced-setup page pattern](project_forced_setup_page_pattern.md) — shared pattern for post-auth wall pages outside /app (setup-password, spaces, setup-2fa, mfa)
+- [Self-service signup (/signup)](project_self_service_signup.md) — email+login-password signup, register() API+provider, two-password copy, hands off to setup-password ladder
+- [Login vs Master password copy](project_login_vs_master_password_copy.md) — sign-in surfaces say "password"; Master Password only for vault unlock + sensitive re-auth (which keys, which to keep)
+- [Folder/item sharing + effectiveRole gating](project_folder_item_sharing.md) — grants.ts wrappers, ShareDialog resourceKind dispatch, per-item "most specific wins" affordance gating, view-only state
+- [Audit Log wired to GET /audit](project_audit_log_wired.md) — audit.ts wrapper, keyset Load-more, server vs client filters, action→i18n map, guessed action codes to verify
+- [Trash feature](project_trash_feature.md) — Trash page wired to real /trash endpoints (admin-only); src/lib/api/trash.ts; type is login|note only; purgeAt + useVaults().refresh()
+- [Workspace settings full wiring](project_workspace_settings_full_wiring.md) — GET/PATCH /workspace/settings; useWorkspaceSettingsController hook; only require2fa+autoLock live, rest Preview
+- [SSO enforcement Phase A](project_sso_enforcement_phase_a.md) — requireSso/jitEnabled/allowedDomains are Preview-only (not enforced) until AC-006.2 verified domain binding ships
+- [UI honesty: no fake Enforced](feedback_ui_honesty_no_fake_enforced.md) — never render live/Enforced UI for a security feature the backend doesn't actually enforce; use inert Preview pattern

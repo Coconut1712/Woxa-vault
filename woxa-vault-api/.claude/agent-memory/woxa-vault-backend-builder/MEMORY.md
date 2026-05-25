@@ -1,0 +1,4 @@
+- [Single-owner invariant](project_single_owner_invariant.md) — org_members allows only ONE owner row/org (org_members_single_owner_idx); don't mint two owners in tests
+- [Resend test pre-existing failure](project_resend_test_failure.md) — resend.test.ts "not_configured" case fails in isolation; suite baseline is 1 failed/76 passed, unrelated to member code
+- [Drizzle migration quirks](project_drizzle_migration_quirks.md) — meta snapshot chain was broken (0006 dup, 0007-12 missing) + journal `when` ordering trap silently skips new migrations; how to repair
+- [Trash feature](project_trash_feature.md) — soft-delete/restore/purge/empty is admin+ & org-wide; DELETE /items/:id now SOFT-deletes; routes/trash.ts + migration 0014; TRASH_RETENTION_DAYS=30 (no auto-purge)

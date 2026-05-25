@@ -1,0 +1,3429 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Woxa Secret Vault — Notion Prototype</title>
+<style>
+  /* ====================================================================
+     NOTION DESIGN TOKENS
+     ==================================================================== */
+  :root {
+    /* Backgrounds */
+    --bg: #ffffff;
+    --bg-secondary: #f7f7f5;
+    --bg-tertiary: #f1f1ef;
+    --bg-hover: rgba(55, 53, 47, 0.06);
+    --bg-active: rgba(55, 53, 47, 0.08);
+
+    /* Text */
+    --text: #37352f;
+    --text-secondary: #787774;
+    --text-tertiary: #9b9b97;
+    --text-on-color: #ffffff;
+
+    /* Borders */
+    --border: #e9e9e7;
+    --border-strong: #d3d3d1;
+    --divider: rgba(55, 53, 47, 0.09);
+
+    /* Accent (Notion blue) */
+    --blue: #2383e2;
+    --blue-bg: #e7f3f8;
+    --blue-bg-hover: #d3e9f3;
+
+    /* Notion tag palette */
+    --tag-default: #787774;     --tag-default-bg: #f1f1ef;
+    --tag-gray: #5a5a57;        --tag-gray-bg: #ebebea;
+    --tag-brown: #976d57;       --tag-brown-bg: #f3eeee;
+    --tag-orange: #cc782f;      --tag-orange-bg: #f8ecdf;
+    --tag-yellow: #c29243;      --tag-yellow-bg: #fbf3db;
+    --tag-green: #548164;       --tag-green-bg: #edf3ec;
+    --tag-blue: #487ca5;        --tag-blue-bg: #e7f3f8;
+    --tag-purple: #8a67ab;      --tag-purple-bg: #f4eef8;
+    --tag-pink: #b35488;        --tag-pink-bg: #f9eef3;
+    --tag-red: #c4554d;         --tag-red-bg: #fbe9e7;
+
+    /* Shadows */
+    --shadow-sm: rgba(15, 15, 15, 0.05) 0px 0px 0px 1px, rgba(15, 15, 15, 0.1) 0px 3px 6px;
+    --shadow-md: rgba(15, 15, 15, 0.05) 0px 0px 0px 1px, rgba(15, 15, 15, 0.1) 0px 5px 14px;
+    --shadow-lg: rgba(15, 15, 15, 0.05) 0px 0px 0px 1px, rgba(15, 15, 15, 0.1) 0px 9px 24px;
+
+    /* Typography */
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, "Apple Color Emoji", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+    /* Spacing */
+    --radius-sm: 3px;
+    --radius: 6px;
+    --radius-lg: 8px;
+  }
+
+  /* Dark mode (Notion's dark theme) */
+  [data-theme="dark"] {
+    --bg: #191919;
+    --bg-secondary: #202020;
+    --bg-tertiary: #2f2f2f;
+    --bg-hover: rgba(255, 255, 255, 0.055);
+    --bg-active: rgba(255, 255, 255, 0.08);
+    --text: #e6e6e3;
+    --text-secondary: #9b9a97;
+    --text-tertiary: #7d7d7a;
+    --border: #2f2f2f;
+    --border-strong: #444444;
+    --divider: rgba(255, 255, 255, 0.094);
+    --tag-default-bg: #373737;
+    --tag-gray-bg: #5a5a5a;
+    --tag-brown-bg: #603b2c;
+    --tag-orange-bg: #854c1d;
+    --tag-yellow-bg: #89632a;
+    --tag-green-bg: #2b593f;
+    --tag-blue-bg: #28456c;
+    --tag-purple-bg: #492f64;
+    --tag-pink-bg: #69314c;
+    --tag-red-bg: #6e3630;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--font-sans);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  /* ====================================================================
+     DEMO CONTROL BAR (top of page)
+     ==================================================================== */
+  .demo-bar {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 100;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+  }
+  .demo-brand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 8px;
+    border-radius: var(--radius);
+    color: var(--text);
+  }
+  .demo-brand-icon {
+    width: 18px; height: 18px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px;
+  }
+  .demo-label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    padding-left: 8px;
+    border-left: 1px solid var(--border);
+    margin-left: 4px;
+  }
+  .demo-tabs {
+    display: flex;
+    gap: 2px;
+    flex: 1;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .demo-tabs::-webkit-scrollbar { display: none; }
+  .demo-tab {
+    padding: 4px 8px;
+    border-radius: var(--radius);
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .demo-tab:hover { background: var(--bg-hover); color: var(--text); }
+  .demo-tab.active {
+    background: var(--bg-active);
+    color: var(--text);
+    font-weight: 500;
+  }
+  .demo-tab .num {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    background: var(--bg-tertiary);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .demo-tab.active .num { background: rgba(35, 131, 226, 0.15); color: var(--blue); }
+
+  .theme-toggle {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px 8px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+  .theme-toggle:hover { background: var(--bg-hover); }
+
+  .demo-tour {
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    background: var(--blue);
+    color: white;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .demo-tour:hover { background: #1a6db8; }
+
+  /* ====================================================================
+     SCREEN CONTAINER
+     ==================================================================== */
+  .screen { display: none; padding-top: 44px; min-height: 100vh; }
+  .screen.active { display: block; animation: fadeIn 120ms ease-out; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+  /* ====================================================================
+     APP LAYOUT (sidebar + main)
+     ==================================================================== */
+  .app {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    min-height: calc(100vh - 44px);
+    background: var(--bg);
+  }
+
+  /* SIDEBAR */
+  .sidebar {
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--divider);
+    padding: 12px 0;
+    overflow-y: auto;
+    height: calc(100vh - 44px);
+    position: sticky;
+    top: 44px;
+    font-size: 14px;
+  }
+  .sidebar-section { padding: 0 8px; margin-bottom: 4px; }
+  .sidebar-section + .sidebar-section { margin-top: 16px; }
+  .sidebar-section-label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-weight: 500;
+    padding: 4px 6px;
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .sidebar-section-label-action {
+    opacity: 0;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text-tertiary);
+    padding: 2px 4px;
+    border-radius: 3px;
+  }
+  .sidebar-section:hover .sidebar-section-label-action { opacity: 1; }
+  .sidebar-section-label-action:hover { background: var(--bg-hover); }
+
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px 4px 8px;
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1.4;
+    transition: background 80ms;
+    user-select: none;
+    min-height: 28px;
+  }
+  .sidebar-item:hover { background: var(--bg-hover); }
+  .sidebar-item.active { background: var(--bg-active); font-weight: 500; }
+  .sidebar-item .icon {
+    width: 18px; height: 18px;
+    display: inline-flex;
+    align-items: center; justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .sidebar-item .toggle-arrow {
+    width: 16px; height: 16px;
+    display: inline-flex;
+    align-items: center; justify-content: center;
+    color: var(--text-tertiary);
+    font-size: 10px;
+    cursor: pointer;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .sidebar-item .toggle-arrow:hover { background: var(--bg-hover); color: var(--text); }
+  .sidebar-item .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sidebar-item .count {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    margin-left: auto;
+  }
+  .sidebar-item .actions {
+    opacity: 0;
+    display: flex;
+    gap: 2px;
+  }
+  .sidebar-item:hover .actions { opacity: 1; }
+  .sidebar-item .action-btn {
+    width: 20px; height: 20px;
+    display: inline-flex;
+    align-items: center; justify-content: center;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    border-radius: 3px;
+    background: none;
+    border: none;
+    font-size: 12px;
+  }
+  .sidebar-item .action-btn:hover { background: var(--bg-hover); color: var(--text); }
+
+  .sidebar-children {
+    padding-left: 18px;
+    border-left: 1px solid var(--divider);
+    margin-left: 14px;
+  }
+
+  .workspace-switcher {
+    padding: 4px 8px 8px;
+    border-bottom: 1px solid var(--divider);
+    margin-bottom: 8px;
+  }
+  .workspace-button {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: var(--radius);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--text);
+    font-family: inherit;
+    text-align: left;
+  }
+  .workspace-button:hover { background: var(--bg-hover); }
+  .workspace-avatar {
+    width: 22px; height: 22px;
+    border-radius: var(--radius-sm);
+    background: linear-gradient(135deg, #4a90e2, #7b61ff);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700;
+    font-size: 12px;
+    color: white;
+    flex-shrink: 0;
+  }
+  .workspace-meta { flex: 1; min-width: 0; }
+  .workspace-name {
+    font-size: 14px; font-weight: 600;
+    line-height: 1.2;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .workspace-plan {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+    line-height: 1;
+  }
+  .workspace-chevron { color: var(--text-tertiary); font-size: 12px; }
+
+  .sidebar-search {
+    margin: 0 8px 8px;
+    padding: 6px 8px;
+    background: var(--bg);
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .sidebar-search:hover { background: var(--bg-tertiary); }
+  .sidebar-search .kbd {
+    margin-left: auto;
+    font-size: 11px;
+    background: var(--bg-tertiary);
+    padding: 2px 5px;
+    border-radius: 3px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+  }
+
+  /* MAIN AREA */
+  .main {
+    overflow-y: auto;
+    padding: 0;
+    min-height: calc(100vh - 44px);
+  }
+
+  .main-topbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--divider);
+    min-height: 44px;
+    background: var(--bg);
+    position: sticky;
+    top: 44px;
+    z-index: 10;
+  }
+  .breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    font-size: 13px;
+    color: var(--text-secondary);
+    min-width: 0;
+  }
+  .breadcrumb-item {
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 3px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: inherit;
+    text-decoration: none;
+  }
+  .breadcrumb-item:hover { background: var(--bg-hover); color: var(--text); }
+  .breadcrumb-separator { color: var(--text-tertiary); font-size: 10px; }
+  .breadcrumb-item.current { color: var(--text); }
+
+  .topbar-actions { display: flex; gap: 2px; align-items: center; }
+  .topbar-btn {
+    padding: 4px 8px;
+    border-radius: var(--radius);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .topbar-btn:hover { background: var(--bg-hover); color: var(--text); }
+  .topbar-btn.primary { color: var(--blue); }
+
+  /* ====================================================================
+     PAGE
+     ==================================================================== */
+  .page {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 0 96px 120px;
+  }
+  .page-wide { max-width: 1180px; padding: 0 56px 120px; }
+  .page-full { max-width: none; padding: 0 56px 120px; }
+
+  .page-cover {
+    height: 30px;
+  }
+
+  .page-icon {
+    font-size: 78px;
+    line-height: 1;
+    padding: 16px 0 8px;
+    margin-left: -8px;
+  }
+  .page-title {
+    font-size: 40px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    padding: 4px 0 8px;
+    margin-bottom: 8px;
+  }
+  .page-title-input {
+    font-size: 40px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    width: 100%;
+    padding: 4px 0 8px;
+    margin-bottom: 8px;
+    outline: none;
+  }
+  .page-title-input::placeholder { color: var(--text-tertiary); opacity: 0.5; }
+
+  /* Property bar (key:value rows under page title) */
+  .properties {
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--divider);
+    padding-bottom: 12px;
+  }
+  .property {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    min-height: 30px;
+  }
+  .property-label {
+    width: 160px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+    font-size: 14px;
+  }
+  .property-icon { width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; color: var(--text-tertiary); }
+  .property-value {
+    flex: 1;
+    color: var(--text);
+    font-size: 14px;
+    cursor: text;
+    padding: 4px 6px;
+    margin: -4px -6px;
+    border-radius: var(--radius-sm);
+    min-height: 22px;
+  }
+  .property-value:hover { background: var(--bg-hover); }
+  .property-value.empty { color: var(--text-tertiary); }
+
+  /* ====================================================================
+     TAGS
+     ==================================================================== */
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-size: 13px;
+    line-height: 1.2;
+    color: var(--tag-default);
+    background: var(--tag-default-bg);
+    max-width: 200px;
+    min-height: 18px;
+  }
+  .tag-gray   { color: var(--tag-gray);   background: var(--tag-gray-bg); }
+  .tag-brown  { color: var(--tag-brown);  background: var(--tag-brown-bg); }
+  .tag-orange { color: var(--tag-orange); background: var(--tag-orange-bg); }
+  .tag-yellow { color: var(--tag-yellow); background: var(--tag-yellow-bg); }
+  .tag-green  { color: var(--tag-green);  background: var(--tag-green-bg); }
+  .tag-blue   { color: var(--tag-blue);   background: var(--tag-blue-bg); }
+  .tag-purple { color: var(--tag-purple); background: var(--tag-purple-bg); }
+  .tag-pink   { color: var(--tag-pink);   background: var(--tag-pink-bg); }
+  .tag-red    { color: var(--tag-red);    background: var(--tag-red-bg); }
+  .tag-dot::before {
+    content: "";
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+    margin-right: 2px;
+  }
+  .tag-stack { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+
+  /* ====================================================================
+     BUTTONS
+     ==================================================================== */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 14px;
+    font-family: inherit;
+    line-height: 1.4;
+    transition: background 80ms, border-color 80ms;
+    text-decoration: none;
+    user-select: none;
+  }
+  .btn:hover { background: var(--bg-tertiary); }
+  .btn:active { transform: translateY(1px); }
+  .btn-primary {
+    background: var(--blue);
+    border-color: var(--blue);
+    color: white;
+  }
+  .btn-primary:hover { background: #1a6db8; border-color: #1a6db8; }
+  .btn-ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
+  .btn-ghost:hover { background: var(--bg-hover); color: var(--text); }
+  .btn-icon {
+    padding: 5px;
+    width: 28px; height: 28px;
+  }
+  .btn-sm { padding: 3px 8px; font-size: 13px; }
+  .btn-lg { padding: 8px 16px; font-size: 14px; }
+  .btn-block { width: 100%; }
+  .btn-danger { color: var(--tag-red); }
+  .btn-danger:hover { background: var(--tag-red-bg); }
+  .btn-google {
+    background: white;
+    color: #1f1f1f;
+    border: 1px solid #dadce0;
+    font-weight: 500;
+    gap: 10px;
+    padding: 9px 16px;
+  }
+  .btn-google:hover { background: #f8f9fa; }
+  .btn-google svg { width: 18px; height: 18px; }
+  [data-theme="dark"] .btn-google { background: #2f2f2f; color: var(--text); border-color: var(--border-strong); }
+  [data-theme="dark"] .btn-google:hover { background: var(--bg-tertiary); }
+
+  /* ====================================================================
+     INPUTS
+     ==================================================================== */
+  .input {
+    width: 100%;
+    padding: 6px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.4;
+    transition: border-color 80ms, box-shadow 80ms;
+  }
+  .input:focus {
+    outline: none;
+    border-color: var(--blue);
+    box-shadow: 0 0 0 2px rgba(35, 131, 226, 0.2);
+  }
+  .input::placeholder { color: var(--text-tertiary); }
+  .input-lg { padding: 9px 12px; font-size: 14px; }
+  .input-inline {
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 4px 6px;
+    margin: -4px -6px;
+    background: transparent;
+  }
+  .input-inline:hover { background: var(--bg-hover); }
+  .input-inline:focus { background: var(--bg-tertiary); }
+
+  textarea.input { resize: vertical; min-height: 80px; }
+  select.input { cursor: pointer; }
+
+  .field-group { margin-bottom: 16px; }
+  .field-label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+  }
+  .field-hint {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: 4px;
+  }
+
+  /* ====================================================================
+     CALLOUTS (Notion-style)
+     ==================================================================== */
+  .callout {
+    display: flex;
+    gap: 10px;
+    padding: 16px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg);
+    margin: 8px 0;
+    align-items: flex-start;
+  }
+  .callout-icon {
+    flex-shrink: 0;
+    width: 22px; height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+  }
+  .callout-body {
+    flex: 1;
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .callout-body strong { font-weight: 600; }
+  .callout-blue { background: var(--tag-blue-bg); }
+  .callout-yellow { background: var(--tag-yellow-bg); }
+  .callout-green { background: var(--tag-green-bg); }
+  .callout-red { background: var(--tag-red-bg); }
+  .callout-purple { background: var(--tag-purple-bg); }
+  .callout-gray { background: var(--bg-tertiary); }
+
+  /* ====================================================================
+     TOGGLES (collapsible blocks)
+     ==================================================================== */
+  .toggle-block {
+    border-radius: var(--radius);
+    margin: 4px 0;
+  }
+  .toggle-header {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    user-select: none;
+  }
+  .toggle-header:hover { background: var(--bg-hover); }
+  .toggle-arrow {
+    width: 20px; height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-tertiary);
+    transition: transform 100ms;
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+  .toggle-block[open] .toggle-arrow { transform: rotate(90deg); }
+  .toggle-title {
+    font-weight: 600;
+    flex: 1;
+    color: var(--text);
+    font-size: 16px;
+  }
+  .toggle-content {
+    padding: 4px 6px 8px 30px;
+    display: none;
+  }
+  .toggle-block[open] .toggle-content { display: block; }
+
+  /* ====================================================================
+     HEADINGS / TEXT BLOCKS
+     ==================================================================== */
+  .h1 {
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 32px 0 4px;
+    line-height: 1.3;
+  }
+  .h2 {
+    font-size: 24px;
+    font-weight: 600;
+    margin: 28px 0 4px;
+    line-height: 1.3;
+  }
+  .h3 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 22px 0 4px;
+    line-height: 1.3;
+  }
+  .text { margin: 2px 0; font-size: 16px; line-height: 1.6; }
+  .text-muted { color: var(--text-secondary); }
+  .text-small { font-size: 14px; }
+  .text-mono { font-family: var(--font-mono); }
+  .divider { height: 1px; background: var(--divider); margin: 16px 0; }
+
+  /* ====================================================================
+     DATABASE TABLE (Notion-style item list)
+     ==================================================================== */
+  .database {
+    margin: 8px 0 16px;
+  }
+  .database-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    padding: 4px 0;
+  }
+  .database-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .database-views {
+    display: flex;
+    gap: 2px;
+    align-items: center;
+  }
+  .database-view {
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .database-view.active { color: var(--text); border-bottom-color: var(--text); }
+  .database-view:hover { background: var(--bg-hover); }
+  .database-toolbar { display: flex; gap: 4px; margin-left: auto; align-items: center; }
+  .database-filter {
+    padding: 3px 8px;
+    border-radius: 3px;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .database-filter:hover { background: var(--bg-hover); color: var(--text); }
+  .database-filter.active { background: var(--tag-blue-bg); color: var(--tag-blue); }
+
+  .db-table {
+    border-top: 1px solid var(--divider);
+    border-bottom: 1px solid var(--divider);
+  }
+  .db-row {
+    display: grid;
+    grid-template-columns: 32px 1fr 220px 160px 140px 100px;
+    gap: 0;
+    border-bottom: 1px solid var(--divider);
+    align-items: center;
+    min-height: 36px;
+    transition: background 80ms;
+  }
+  .db-row:last-child { border-bottom: none; }
+  .db-row:not(.db-header):hover { background: var(--bg-hover); cursor: pointer; }
+  .db-row.db-header {
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-transform: none;
+    font-weight: 500;
+    min-height: 32px;
+  }
+  .db-cell {
+    padding: 6px 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .db-cell-icon { padding-left: 12px; padding-right: 4px; font-size: 16px; }
+  .db-cell-name { font-weight: 500; }
+  .db-cell-secondary { color: var(--text-secondary); font-size: 13px; }
+  .db-cell-actions {
+    display: flex;
+    gap: 2px;
+    justify-content: flex-end;
+    padding-right: 8px;
+    opacity: 0;
+  }
+  .db-row:hover .db-cell-actions { opacity: 1; }
+
+  .db-add-row {
+    padding: 6px 12px;
+    font-size: 14px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    border-bottom: 1px solid var(--divider);
+  }
+  .db-add-row:hover { background: var(--bg-hover); color: var(--text); }
+
+  .db-count {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    padding: 8px 12px;
+  }
+
+  /* ====================================================================
+     AUTH PAGES (centered card)
+     ==================================================================== */
+  .auth-container {
+    min-height: calc(100vh - 44px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    background: var(--bg);
+  }
+  .auth-card {
+    width: 100%;
+    max-width: 420px;
+  }
+  .auth-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 32px;
+  }
+  .auth-logo-icon {
+    width: 28px; height: 28px;
+    border-radius: 6px;
+    background: linear-gradient(135deg, var(--blue), #7b61ff);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+  .auth-logo-text { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+  .auth-title {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    margin-bottom: 8px;
+  }
+  .auth-subtitle {
+    color: var(--text-secondary);
+    margin-bottom: 28px;
+    font-size: 15px;
+  }
+  .auth-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 24px 0;
+    color: var(--text-tertiary);
+    font-size: 12px;
+  }
+  .auth-divider::before, .auth-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--divider);
+  }
+  .auth-footer {
+    margin-top: 24px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-tertiary);
+  }
+  .auth-footer a { color: var(--blue); text-decoration: none; }
+
+  .workspace-card {
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg);
+    padding: 12px 14px;
+    margin: 16px 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .workspace-card-avatar {
+    width: 36px; height: 36px;
+    border-radius: var(--radius);
+    background: linear-gradient(135deg, var(--blue), #7b61ff);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700;
+    color: white;
+    flex-shrink: 0;
+    font-size: 16px;
+  }
+  .workspace-card-info { flex: 1; min-width: 0; }
+  .workspace-card-name { font-weight: 600; font-size: 14px; }
+  .workspace-card-domain { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
+
+  /* ====================================================================
+     GOOGLE OAUTH (mock)
+     ==================================================================== */
+  .google-page {
+    min-height: calc(100vh - 44px);
+    background: #ffffff;
+    color: #202124;
+    font-family: 'Google Sans', 'Roboto', Arial, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  [data-theme="dark"] .google-page { background: #202124; color: #e8eaed; }
+  .google-card {
+    width: 100%;
+    max-width: 450px;
+    background: white;
+    border: 1px solid #dadce0;
+    border-radius: 8px;
+    padding: 40px 36px 32px;
+  }
+  [data-theme="dark"] .google-card { background: #2d2e30; border-color: #5f6368; }
+  .google-h1 { font-size: 22px; font-weight: 400; margin: 16px 0 8px; }
+  .google-h2 { font-size: 14px; margin-bottom: 24px; color: #5f6368; }
+  [data-theme="dark"] .google-h2 { color: #9aa0a6; }
+  .google-account {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 8px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+    cursor: pointer;
+    transition: background 100ms;
+  }
+  .google-account:hover { background: #f8f9fa; }
+  [data-theme="dark"] .google-account:hover { background: #3c4043; }
+  .google-avatar {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: #1a73e8;
+    color: white;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 500;
+  }
+  .google-acc-name { font-size: 14px; font-weight: 500; }
+  .google-acc-email { font-size: 12px; color: #5f6368; }
+  [data-theme="dark"] .google-acc-email { color: #9aa0a6; }
+  .google-banner {
+    background: #e8f0fe;
+    border-left: 3px solid #1a73e8;
+    padding: 12px 14px;
+    border-radius: 4px;
+    margin: 16px 0;
+    font-size: 13px;
+    color: #1f1f1f;
+  }
+  [data-theme="dark"] .google-banner { background: rgba(26, 115, 232, 0.15); color: #e8eaed; }
+  .google-link {
+    color: #1a73e8;
+    background: none;
+    border: none;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-family: inherit;
+  }
+  .google-link:hover { background: rgba(26,115,232,0.04); }
+
+  /* ====================================================================
+     MODALS
+     ==================================================================== */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 15, 15, 0.4);
+    backdrop-filter: blur(2px);
+    z-index: 500;
+    display: none;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 80px 20px 40px;
+    overflow-y: auto;
+  }
+  .modal-overlay.open { display: flex; animation: fadeIn 120ms; }
+  .modal {
+    width: 100%;
+    max-width: 520px;
+    background: var(--bg);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+  }
+  .modal-wide { max-width: 720px; }
+  .modal-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--divider);
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .modal-title { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+  .modal-subtitle { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+  .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; max-height: 70vh; overflow-y: auto; }
+  .modal-footer {
+    padding: 12px 20px;
+    border-top: 1px solid var(--divider);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  /* ====================================================================
+     TOAST
+     ==================================================================== */
+  #toast-container {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .toast {
+    background: var(--bg);
+    box-shadow: var(--shadow-md);
+    border-radius: var(--radius-lg);
+    padding: 12px 16px;
+    min-width: 280px;
+    max-width: 380px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    animation: toastIn 200ms;
+    border-left: 3px solid var(--blue);
+  }
+  .toast.success { border-left-color: var(--tag-green); }
+  .toast.warning { border-left-color: var(--tag-yellow); }
+  .toast.error { border-left-color: var(--tag-red); }
+  .toast.info { border-left-color: var(--blue); }
+  @keyframes toastIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  .toast-icon { font-size: 16px; line-height: 1.2; }
+  .toast-title { font-size: 14px; font-weight: 600; }
+  .toast-message { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+
+  /* ====================================================================
+     RECIPIENT VIEW
+     ==================================================================== */
+  .recipient-page {
+    min-height: calc(100vh - 44px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    background: var(--bg);
+  }
+  .recipient-card {
+    width: 100%;
+    max-width: 540px;
+  }
+  .recipient-sender {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius);
+    margin-bottom: 16px;
+    font-size: 14px;
+  }
+  .avatar-circle {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--blue), #7b61ff);
+    color: white;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600;
+    flex-shrink: 0;
+  }
+  .avatar-circle.team { background: linear-gradient(135deg, var(--tag-green), #2d6a4f); }
+  .avatar-circle.guest { background: linear-gradient(135deg, var(--tag-yellow), #d97706); }
+
+  .secret-box {
+    background: var(--bg-secondary);
+    border-radius: var(--radius);
+    padding: 14px;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    word-break: break-all;
+    position: relative;
+    margin: 8px 0;
+  }
+
+  /* ====================================================================
+     2FA INPUT
+     ==================================================================== */
+  .totp-input-group {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin: 20px 0;
+  }
+  .totp-digit {
+    width: 42px;
+    height: 50px;
+    text-align: center;
+    font-size: 20px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--text);
+  }
+  .totp-digit.filled { border-color: var(--blue); }
+  .totp-digit:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 2px rgba(35, 131, 226, 0.2); }
+
+  /* ====================================================================
+     TOTP COUNTDOWN
+     ==================================================================== */
+  .totp-display {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--font-mono);
+  }
+  .totp-code {
+    font-size: 16px;
+    letter-spacing: 3px;
+    color: var(--blue);
+    font-weight: 600;
+  }
+  .totp-ring { width: 20px; height: 20px; }
+  .totp-ring circle { fill: none; stroke-width: 2; }
+  .totp-ring .bg { stroke: var(--border); }
+  .totp-ring .fg { stroke: var(--blue); transition: stroke-dasharray 1s linear; }
+  .totp-seconds { font-size: 11px; color: var(--text-tertiary); min-width: 22px; }
+
+  /* ====================================================================
+     PILL GROUP (segmented buttons)
+     ==================================================================== */
+  .pill-group { display: flex; gap: 4px; flex-wrap: wrap; }
+  .pill {
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .pill:hover { background: var(--bg-hover); }
+  .pill.active {
+    background: var(--tag-blue-bg);
+    border-color: var(--blue);
+    color: var(--tag-blue);
+    font-weight: 500;
+  }
+
+  /* ====================================================================
+     SETTINGS LIST
+     ==================================================================== */
+  .settings-section { margin-bottom: 32px; }
+  .settings-section h2 { display: flex; align-items: center; gap: 8px; }
+  .settings-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--divider);
+  }
+  .settings-row:last-child { border-bottom: none; }
+  .settings-row-info { flex: 1; min-width: 0; }
+  .settings-row-title { font-weight: 500; font-size: 14px; }
+  .settings-row-desc { color: var(--text-secondary); font-size: 13px; margin-top: 2px; }
+
+  .switch {
+    position: relative;
+    width: 32px; height: 18px;
+    background: var(--border-strong);
+    border-radius: 9px;
+    cursor: pointer;
+    transition: background 120ms;
+    flex-shrink: 0;
+  }
+  .switch.on { background: var(--blue); }
+  .switch::after {
+    content: '';
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    background: white;
+    border-radius: 50%;
+    transition: transform 120ms;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  }
+  .switch.on::after { transform: translateX(14px); }
+
+  /* SSO Provider rows */
+  .sso-provider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+  }
+  .sso-provider-icon {
+    width: 32px; height: 32px;
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .sso-provider-info { flex: 1; min-width: 0; }
+  .sso-provider-name { font-weight: 600; font-size: 14px; }
+  .sso-provider-status { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+  .status-indicator {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 4px;
+    background: var(--tag-green);
+  }
+
+  /* Domain rows */
+  .domain-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+  .domain-card.verified { background: var(--tag-green-bg); }
+  .domain-card.pending { background: var(--tag-yellow-bg); }
+
+  .verify-record {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .verify-record-label {
+    color: var(--text-tertiary);
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
+  /* Group mapping */
+  .group-mapping {
+    display: grid;
+    grid-template-columns: 1fr 20px 1fr auto;
+    gap: 8px;
+    align-items: center;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+  }
+  .group-mapping-arrow { color: var(--text-tertiary); text-align: center; }
+
+  /* ====================================================================
+     ACCESS LIST / ACTIVITY (in item detail)
+     ==================================================================== */
+  .access-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+  }
+  .access-info { flex: 1; min-width: 0; }
+  .access-name { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .access-role { font-size: 12px; color: var(--text-secondary); margin-top: 1px; }
+
+  .activity-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 6px 0;
+    font-size: 14px;
+  }
+  .activity-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-top: 6px;
+    flex-shrink: 0;
+    background: var(--blue);
+  }
+  .activity-dot.view { background: var(--tag-blue); }
+  .activity-dot.edit { background: var(--tag-yellow); }
+  .activity-dot.share { background: var(--tag-purple); }
+  .activity-meta { color: var(--text-tertiary); font-size: 12px; margin-top: 2px; }
+
+  /* ====================================================================
+     WIZARD
+     ==================================================================== */
+  .wizard {
+    max-width: 600px;
+    margin: 0 auto;
+    padding-top: 32px;
+  }
+  .wizard-steps {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 32px;
+    justify-content: center;
+  }
+  .wizard-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--border);
+  }
+  .wizard-dot.active { background: var(--blue); }
+  .wizard-dot.done { background: var(--tag-green); }
+
+  /* ====================================================================
+     CODE / KBD
+     ==================================================================== */
+  .kbd {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 5px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--bg-tertiary);
+    border-radius: 3px;
+    color: var(--text-secondary);
+  }
+  code.inline {
+    background: var(--tag-red-bg);
+    color: var(--tag-red);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+  }
+
+  /* ====================================================================
+     RESPONSIVE
+     ==================================================================== */
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+    .page { padding: 0 20px 80px; }
+    .page-wide, .page-full { padding: 0 20px 80px; }
+    .db-row { grid-template-columns: 32px 1fr auto; }
+    .db-row > *:nth-child(3),
+    .db-row > *:nth-child(4),
+    .db-row > *:nth-child(5) { display: none; }
+    .property-label { width: 100px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ====================================================================
+     DEMO CONTROL BAR
+     ==================================================================== -->
+<div class="demo-bar">
+  <div class="demo-brand">
+    <div class="demo-brand-icon">🔐</div>
+    Woxa Vault
+  </div>
+  <span class="demo-label">Prototype</span>
+  <div class="demo-tabs" id="demoTabs">
+    <button class="demo-tab" data-screen="welcome"><span class="num">1</span>Welcome</button>
+    <button class="demo-tab" data-screen="setup"><span class="num">2</span>Setup</button>
+    <button class="demo-tab" data-screen="login"><span class="num">3</span>Login</button>
+    <button class="demo-tab" data-screen="google"><span class="num">4</span>Google</button>
+    <button class="demo-tab" data-screen="twofa"><span class="num">5</span>2FA</button>
+    <button class="demo-tab active" data-screen="dashboard"><span class="num">6</span>Dashboard</button>
+    <button class="demo-tab" data-screen="detail"><span class="num">7</span>Item</button>
+    <button class="demo-tab" data-screen="members"><span class="num">8</span>Members</button>
+    <button class="demo-tab" data-screen="audit"><span class="num">9</span>Audit</button>
+    <button class="demo-tab" data-screen="sso"><span class="num">0</span>SSO</button>
+    <button class="demo-tab" data-screen="recipient">📤 Recipient</button>
+  </div>
+  <button class="demo-tour" onclick="startTour()">▶ Demo Tour</button>
+</div>
+
+<!-- ====================================================================
+     SCREEN: WELCOME
+     ==================================================================== -->
+<div class="screen" id="screen-welcome">
+  <div class="auth-container">
+    <div class="auth-card">
+      <div class="auth-logo">
+        <div class="auth-logo-icon">🔐</div>
+        <div class="auth-logo-text">Woxa Vault</div>
+      </div>
+      <h1 class="auth-title">เริ่มต้นใช้งาน</h1>
+      <p class="auth-subtitle">ป้อนอีเมลที่ทำงาน เราจะค้นหา workspace ให้</p>
+
+      <div class="field-group">
+        <input class="input input-lg" id="welcomeEmail" type="email" placeholder="you@yourcompany.com" value="ching@iux24.com" oninput="checkWorkspace(this.value)" autofocus />
+      </div>
+
+      <div id="workspaceResult">
+        <div class="workspace-card">
+          <div class="workspace-card-avatar">i</div>
+          <div class="workspace-card-info">
+            <div class="workspace-card-name">iux24 Workspace</div>
+            <div class="workspace-card-domain">iux24.com · 24 members</div>
+          </div>
+          <span class="tag tag-green tag-dot">Active</span>
+        </div>
+      </div>
+
+      <button class="btn btn-primary btn-block btn-lg" onclick="showScreen('login')">ดำเนินการต่อ →</button>
+
+      <div class="auth-divider">หรือ</div>
+
+      <button class="btn btn-block" onclick="showScreen('setup')">🏢 สร้าง workspace ใหม่</button>
+
+      <div class="auth-footer">
+        ยังไม่มี Google Workspace? <a href="#">ใช้อีเมล + password ก่อนได้</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================
+     SCREEN: SETUP WIZARD
+     ==================================================================== -->
+<div class="screen" id="screen-setup">
+  <div class="main">
+    <div class="main-topbar">
+      <div class="breadcrumb">
+        <span class="breadcrumb-item" onclick="showScreen('welcome')">🔐 Woxa Vault</span>
+        <span class="breadcrumb-separator">/</span>
+        <span class="breadcrumb-item current">Workspace setup</span>
+      </div>
+    </div>
+
+    <div class="page wizard">
+      <div class="wizard-steps">
+        <div class="wizard-dot done"></div>
+        <div class="wizard-dot active"></div>
+        <div class="wizard-dot"></div>
+        <div class="wizard-dot"></div>
+      </div>
+
+      <div class="page-icon">🏢</div>
+      <h1 class="page-title">เชื่อมต่อ Google Workspace</h1>
+      <p class="text text-muted">ให้สมาชิกใน Google Workspace login เข้าใช้งานได้ทันที (JIT provisioning)</p>
+
+      <div class="divider"></div>
+
+      <div class="callout callout-blue">
+        <div class="callout-icon">💡</div>
+        <div class="callout-body">
+          <strong>เพียงคลิกครั้งเดียว</strong> — เราจะขอ permission แค่ <code class="inline">openid email profile</code>
+          + (optional) <code class="inline">directory.groups.readonly</code> ของ admin เพื่อ sync Google Groups
+        </div>
+      </div>
+
+      <div class="sso-provider" style="margin-top: 20px;">
+        <div class="sso-provider-icon">
+          <svg viewBox="0 0 24 24" width="22" height="22">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+          </svg>
+        </div>
+        <div class="sso-provider-info">
+          <div class="sso-provider-name">Google Workspace</div>
+          <div class="sso-provider-status">SSO + JIT user provisioning + group sync</div>
+        </div>
+      </div>
+
+      <button class="btn btn-google btn-block btn-lg" style="margin-top: 16px;" onclick="toast('info', 'Connecting...', 'Redirecting to Google admin consent'); setTimeout(() => { toast('success', '✓ Connected', 'iux24.com linked successfully'); }, 1500)">
+        <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+        Connect Google Workspace
+      </button>
+
+      <div style="display: flex; justify-content: space-between; margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--divider);">
+        <button class="btn btn-ghost" onclick="showScreen('welcome')">← Back</button>
+        <button class="btn btn-primary" onclick="toast('success', '✓ Continuing...', 'Workspace setup'); setTimeout(() => showScreen('dashboard'), 1200)">Continue →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================
+     SCREEN: LOGIN
+     ==================================================================== -->
+<div class="screen" id="screen-login">
+  <div class="auth-container">
+    <div class="auth-card">
+      <div class="auth-logo">
+        <div class="auth-logo-icon">🔐</div>
+        <div class="auth-logo-text">Woxa Vault</div>
+      </div>
+
+      <div class="workspace-card" style="margin-bottom: 24px;">
+        <div class="workspace-card-avatar">i</div>
+        <div class="workspace-card-info">
+          <div class="workspace-card-name">iux24</div>
+          <div class="workspace-card-domain">iux24.com</div>
+        </div>
+        <button class="btn btn-sm btn-ghost" onclick="showScreen('welcome')">เปลี่ยน</button>
+      </div>
+
+      <h1 class="auth-title">ยินดีต้อนรับกลับมา</h1>
+      <p class="auth-subtitle">เข้าสู่ระบบเพื่อเข้า vault ของทีม</p>
+
+      <button class="btn btn-google btn-block btn-lg" onclick="showScreen('google')">
+        <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+        ดำเนินการต่อด้วย Google Workspace
+      </button>
+      <p style="text-align: center; font-size: 12px; color: var(--text-tertiary); margin-top: 8px;">
+        🔒 เฉพาะอีเมล <strong>@iux24.com</strong>
+      </p>
+
+      <div class="auth-divider">หรือใช้ master password</div>
+
+      <div class="field-group">
+        <label class="field-label">อีเมล</label>
+        <input class="input input-lg" type="email" value="ching@iux24.com" />
+      </div>
+      <div class="field-group">
+        <label class="field-label">Master Password</label>
+        <input class="input input-lg" type="password" value="••••••••••••••" />
+      </div>
+
+      <button class="btn btn-primary btn-block btn-lg" onclick="showScreen('twofa')">
+        🔓 Unlock vault
+      </button>
+
+      <div class="auth-footer">
+        ลืม master password? <a href="#">กู้คืนด้วย Recovery Kit</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================
+     SCREEN: GOOGLE OAUTH (mock)
+     ==================================================================== -->
+<div class="screen" id="screen-google">
+  <div class="google-page">
+    <div class="google-card">
+      <div style="margin-bottom: 24px;">
+        <svg width="75" height="24" viewBox="0 0 75 24">
+          <text x="0" y="20" font-family="Arial" font-size="22" font-weight="500" fill="#4285F4">G</text>
+          <text x="14" y="20" font-family="Arial" font-size="22" font-weight="500" fill="#EA4335">o</text>
+          <text x="28" y="20" font-family="Arial" font-size="22" font-weight="500" fill="#FBBC04">o</text>
+          <text x="42" y="20" font-family="Arial" font-size="22" font-weight="500" fill="#4285F4">g</text>
+          <text x="55" y="20" font-family="Arial" font-size="22" font-weight="500" fill="#34A853">l</text>
+          <text x="62" y="20" font-family="Arial" font-size="22" font-weight="500" fill="#EA4335">e</text>
+        </svg>
+      </div>
+      <div class="google-h1">เลือกบัญชี</div>
+      <div class="google-h2">เพื่อดำเนินการต่อไปยัง <strong>Woxa Vault</strong></div>
+
+      <div class="google-banner">
+        🏢 <strong>Restricted to iux24.com</strong>
+        <div style="font-size: 12px; margin-top: 4px; opacity: 0.8;">
+          แอปนี้กำหนดให้ใช้บัญชีในโดเมน <strong>iux24.com</strong> เท่านั้น
+        </div>
+      </div>
+
+      <div class="google-account" onclick="googleSignIn('ching@iux24.com')">
+        <div class="google-avatar">C</div>
+        <div style="flex: 1;">
+          <div class="google-acc-name">Ching Chanapolcha</div>
+          <div class="google-acc-email">ching@iux24.com · iux24.com</div>
+        </div>
+      </div>
+      <div class="google-account" onclick="googleSignIn('john@iux24.com')">
+        <div class="google-avatar" style="background: #34a853;">J</div>
+        <div style="flex: 1;">
+          <div class="google-acc-name">John Taylor</div>
+          <div class="google-acc-email">john@iux24.com · iux24.com</div>
+        </div>
+      </div>
+      <div class="google-account" style="opacity: 0.5;" onclick="googleSignInRejected('me@gmail.com')">
+        <div class="google-avatar" style="background: #ea4335;">M</div>
+        <div style="flex: 1;">
+          <div class="google-acc-name">My Personal Account</div>
+          <div class="google-acc-email" style="color: #ea4335;">me@gmail.com · ⚠ ไม่อยู่ใน iux24.com</div>
+        </div>
+      </div>
+
+      <button class="google-link" style="margin-top: 8px;">+ ใช้บัญชีอื่น</button>
+
+      <div style="margin-top: 32px; padding-top: 16px; border-top: 1px solid #dadce0; font-size: 12px; color: #5f6368; line-height: 1.5;">
+        การลงชื่อเข้า Woxa Vault จะแชร์ชื่อ, อีเมล, รูปโปรไฟล์ ของคุณ
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================
+     SCREEN: 2FA
+     ==================================================================== -->
+<div class="screen" id="screen-twofa">
+  <div class="auth-container">
+    <div class="auth-card">
+      <div class="auth-logo">
+        <div class="auth-logo-icon">🔐</div>
+        <div class="auth-logo-text">Woxa Vault</div>
+      </div>
+
+      <h1 class="auth-title">ยืนยันตัวตน 2 ชั้น</h1>
+      <p class="auth-subtitle">ป้อนรหัส 6 หลักจาก Authenticator app</p>
+
+      <div class="workspace-card" style="margin-bottom: 16px;">
+        <div class="avatar-circle">C</div>
+        <div class="workspace-card-info">
+          <div class="workspace-card-name">ching@iux24.com</div>
+          <div class="workspace-card-domain">via Google Workspace SSO</div>
+        </div>
+        <span class="tag tag-green tag-dot">SSO</span>
+      </div>
+
+      <div class="totp-input-group">
+        <input class="totp-digit filled" value="3" maxlength="1" />
+        <input class="totp-digit filled" value="9" maxlength="1" />
+        <input class="totp-digit filled" value="2" maxlength="1" />
+        <input class="totp-digit filled" value="4" maxlength="1" />
+        <input class="totp-digit filled" value="8" maxlength="1" />
+        <input class="totp-digit" value="" maxlength="1" autofocus />
+      </div>
+
+      <button class="btn btn-primary btn-block btn-lg" onclick="showScreen('dashboard'); toast('success', '✓ ลงชื่อเข้าใช้สำเร็จ', 'ยินดีต้อนรับ ching@iux24.com')">ยืนยัน</button>
+
+      <div class="auth-divider">หรือ</div>
+      <button class="btn btn-block">🔑 ใช้ Passkey แทน</button>
+      <button class="btn btn-ghost btn-block" style="margin-top: 8px;">📱 ใช้ Backup code</button>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================
+     SCREEN: DASHBOARD (Notion database view)
+     ==================================================================== -->
+<div class="screen active" id="screen-dashboard">
+  <div class="app">
+    <aside class="sidebar">
+      <div class="workspace-switcher">
+        <button class="workspace-button">
+          <div class="workspace-avatar">i</div>
+          <div class="workspace-meta">
+            <div class="workspace-name">iux24</div>
+            <div class="workspace-plan">Business · 24 members</div>
+          </div>
+          <span class="workspace-chevron">⌄</span>
+        </button>
+      </div>
+
+      <div class="sidebar-search" onclick="toast('info', '🔍 Search', 'Cmd+K opens universal search')">
+        <span>🔍</span> Search…
+        <span class="kbd">⌘K</span>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-item">
+          <span class="toggle-arrow">▶</span>
+          <span class="icon">⚡</span>
+          <span class="label">Quick access</span>
+        </div>
+        <div class="sidebar-item active" onclick="filterItems('all', this)">
+          <span class="toggle-arrow"></span>
+          <span class="icon">📋</span>
+          <span class="label">All items</span>
+          <span class="count">8</span>
+        </div>
+        <div class="sidebar-item" onclick="filterItems('fav', this)">
+          <span class="toggle-arrow"></span>
+          <span class="icon">⭐</span>
+          <span class="label">Favorites</span>
+          <span class="count">2</span>
+        </div>
+        <div class="sidebar-item" onclick="filterItems('recent', this)">
+          <span class="toggle-arrow"></span>
+          <span class="icon">🕐</span>
+          <span class="label">Recent</span>
+          <span class="count">5</span>
+        </div>
+        <div class="sidebar-item" onclick="filterItems('shared', this)">
+          <span class="toggle-arrow"></span>
+          <span class="icon">👥</span>
+          <span class="label">Shared with me</span>
+          <span class="count">3</span>
+        </div>
+        <div class="sidebar-item" onclick="showScreen('recipient')">
+          <span class="toggle-arrow"></span>
+          <span class="icon">📤</span>
+          <span class="label">My sends</span>
+          <span class="count">3</span>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-label">
+          <span>Vaults</span>
+          <span class="sidebar-section-label-action">+</span>
+        </div>
+        <div class="sidebar-item">
+          <span class="toggle-arrow">▶</span>
+          <span class="icon">📦</span>
+          <span class="label">Production</span>
+          <span class="count">24</span>
+        </div>
+        <div class="sidebar-item">
+          <span class="toggle-arrow">▶</span>
+          <span class="icon">📦</span>
+          <span class="label">Staging</span>
+          <span class="count">18</span>
+        </div>
+        <div class="sidebar-item">
+          <span class="toggle-arrow">▶</span>
+          <span class="icon">📦</span>
+          <span class="label">Marketing</span>
+          <span class="count">9</span>
+        </div>
+        <div class="sidebar-item">
+          <span class="toggle-arrow">▶</span>
+          <span class="icon">📦</span>
+          <span class="label">Finance</span>
+          <span class="count">6</span>
+        </div>
+        <div class="sidebar-item">
+          <span class="toggle-arrow"></span>
+          <span class="icon">👤</span>
+          <span class="label">My Personal</span>
+          <span class="count">7</span>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-label"><span>Teams</span></div>
+        <div class="sidebar-item">
+          <span class="toggle-arrow"></span>
+          <span class="icon">👥</span>
+          <span class="label">DevOps</span>
+        </div>
+        <div class="sidebar-item">
+          <span class="toggle-arrow"></span>
+          <span class="icon">👥</span>
+          <span class="label">Marketing</span>
+        </div>
+        <div class="sidebar-item">
+          <span class="toggle-arrow"></span>
+          <span class="icon">👥</span>
+          <span class="label">Finance</span>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-label"><span>Admin</span></div>
+        <div class="sidebar-item" onclick="showScreen('members')">
+          <span class="toggle-arrow"></span>
+          <span class="icon">👤</span>
+          <span class="label">Members</span>
+        </div>
+        <div class="sidebar-item" onclick="showScreen('audit')">
+          <span class="toggle-arrow"></span>
+          <span class="icon">📊</span>
+          <span class="label">Audit log</span>
+        </div>
+        <div class="sidebar-item" onclick="showScreen('sso')">
+          <span class="toggle-arrow"></span>
+          <span class="icon">🔑</span>
+          <span class="label">SSO settings</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="main-topbar">
+        <div class="breadcrumb">
+          <span class="breadcrumb-item">iux24</span>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-item current">📋 All items</span>
+        </div>
+        <div class="topbar-actions">
+          <button class="topbar-btn">🔔</button>
+          <button class="topbar-btn">↗ Share</button>
+          <button class="topbar-btn">⋯</button>
+        </div>
+      </div>
+
+      <div class="page page-wide">
+        <div class="page-cover"></div>
+        <div class="page-icon">📋</div>
+        <h1 class="page-title">All items</h1>
+
+        <div class="properties">
+          <div class="property">
+            <div class="property-label"><span class="property-icon">🔒</span>Encryption</div>
+            <div class="property-value"><span class="tag tag-green tag-dot">Zero-knowledge</span></div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">🏢</span>Authentication</div>
+            <div class="property-value"><span class="tag tag-blue tag-dot">Google Workspace SSO</span></div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">📊</span>Total</div>
+            <div class="property-value">64 items across 5 vaults</div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">👤</span>You</div>
+            <div class="property-value"><span class="avatar-circle" style="display:inline-flex; vertical-align:middle; margin-right:6px;">C</span>ching@iux24.com</div>
+          </div>
+        </div>
+
+        <div class="callout callout-blue">
+          <div class="callout-icon">💡</div>
+          <div class="callout-body">
+            <strong>Tip:</strong> กด <span class="kbd">⌘ K</span> เพื่อค้นหา item อะไรก็ได้ใน workspace · กด <span class="kbd">C</span> บนหน้า item เพื่อ copy password · clipboard auto-clear ใน 30 วินาที
+          </div>
+        </div>
+
+        <div class="database">
+          <div class="database-header">
+            <div class="database-views">
+              <span class="database-view active">📋 Table</span>
+              <span class="database-view">🎴 Board</span>
+              <span class="database-view">📅 Calendar</span>
+              <span class="database-view">📊 Gallery</span>
+            </div>
+            <div class="database-toolbar">
+              <button class="database-filter active">Type: All</button>
+              <button class="database-filter">Vault: All</button>
+              <button class="database-filter">↕ Sort</button>
+              <button class="database-filter">🔍 Search</button>
+              <button class="btn btn-primary btn-sm" onclick="openModal('createModal')">+ New</button>
+            </div>
+          </div>
+
+          <div class="db-table" id="itemList">
+            <div class="db-row db-header">
+              <div></div>
+              <div class="db-cell">Aa Name</div>
+              <div class="db-cell">⌗ Vault</div>
+              <div class="db-cell">🏷 Tags</div>
+              <div class="db-cell">📅 Last used</div>
+              <div class="db-cell"></div>
+            </div>
+
+            <div class="db-row" data-search="aws production root" onclick="showScreen('detail')">
+              <div class="db-cell db-cell-icon">🔑</div>
+              <div class="db-cell"><span class="db-cell-name">AWS Production Root Account</span><br><span class="db-cell-secondary">admin@iux24.com</span></div>
+              <div class="db-cell"><span class="tag tag-red">📦 Production</span></div>
+              <div class="db-cell"><span class="tag-stack"><span class="tag tag-orange">aws</span><span class="tag tag-red">root</span></span></div>
+              <div class="db-cell db-cell-secondary">10 min ago</div>
+              <div class="db-cell db-cell-actions">
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation(); copyValue('K9$mP2#vN8xQ@4wL!7zR')" title="Copy">📋</button>
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">⋯</button>
+              </div>
+            </div>
+
+            <div class="db-row" data-search="stripe api">
+              <div class="db-cell db-cell-icon">🔐</div>
+              <div class="db-cell"><span class="db-cell-name">Stripe API Key (Live)</span><br><span class="db-cell-secondary text-mono">sk_live_••••••</span></div>
+              <div class="db-cell"><span class="tag tag-red">📦 Production</span></div>
+              <div class="db-cell"><span class="tag-stack"><span class="tag tag-purple">api</span><span class="tag tag-blue">payments</span></span></div>
+              <div class="db-cell db-cell-secondary">2 hours ago</div>
+              <div class="db-cell db-cell-actions">
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation(); copyValue('sk_live_demo')">📋</button>
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">⋯</button>
+              </div>
+            </div>
+
+            <div class="db-row" data-search="bastion ssh">
+              <div class="db-cell db-cell-icon">🖥</div>
+              <div class="db-cell"><span class="db-cell-name">Bastion Host SSH Key</span><br><span class="db-cell-secondary">deploy@bastion.iux24.com</span></div>
+              <div class="db-cell"><span class="tag tag-red">📦 Production</span></div>
+              <div class="db-cell"><span class="tag-stack"><span class="tag tag-blue">ssh</span><span class="tag tag-gray">ed25519</span></span></div>
+              <div class="db-cell db-cell-secondary">Yesterday</div>
+              <div class="db-cell db-cell-actions">
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">📋</button>
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">⋯</button>
+              </div>
+            </div>
+
+            <div class="db-row" data-search="postgres database">
+              <div class="db-cell db-cell-icon">🔑</div>
+              <div class="db-cell"><span class="db-cell-name">Postgres Production</span><br><span class="db-cell-secondary">vault_user · db.iux24.internal:5432</span></div>
+              <div class="db-cell"><span class="tag tag-red">📦 Production</span></div>
+              <div class="db-cell"><span class="tag tag-blue">database</span></div>
+              <div class="db-cell db-cell-secondary">2 days ago</div>
+              <div class="db-cell db-cell-actions">
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">📋</button>
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">⋯</button>
+              </div>
+            </div>
+
+            <div class="db-row" data-search="mailchimp marketing">
+              <div class="db-cell db-cell-icon">🔑</div>
+              <div class="db-cell"><span class="db-cell-name">Mailchimp Marketing</span><br><span class="db-cell-secondary">marketing@iux24.com</span></div>
+              <div class="db-cell"><span class="tag tag-orange">📦 Marketing</span></div>
+              <div class="db-cell"><span class="tag tag-pink">email</span></div>
+              <div class="db-cell db-cell-secondary">3 days ago</div>
+              <div class="db-cell db-cell-actions">
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">📋</button>
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">⋯</button>
+              </div>
+            </div>
+
+            <div class="db-row" data-search="domain recovery">
+              <div class="db-cell db-cell-icon">📝</div>
+              <div class="db-cell"><span class="db-cell-name">Domain Registrar Recovery Codes</span><br><span class="db-cell-secondary">8 codes</span></div>
+              <div class="db-cell"><span class="tag tag-green">📦 Finance</span></div>
+              <div class="db-cell"><span class="tag tag-yellow">recovery</span></div>
+              <div class="db-cell db-cell-secondary">1 week ago</div>
+              <div class="db-cell db-cell-actions">
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">📋</button>
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">⋯</button>
+              </div>
+            </div>
+
+            <div class="db-row" data-search="openai api">
+              <div class="db-cell db-cell-icon">🔐</div>
+              <div class="db-cell"><span class="db-cell-name">OpenAI API Key (Team)</span><br><span class="db-cell-secondary text-mono">sk-proj-••••••</span></div>
+              <div class="db-cell"><span class="tag tag-red">📦 Production</span></div>
+              <div class="db-cell"><span class="tag-stack"><span class="tag tag-purple">api</span><span class="tag tag-blue">ai</span></span></div>
+              <div class="db-cell db-cell-secondary">1 week ago</div>
+              <div class="db-cell db-cell-actions">
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">📋</button>
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">⋯</button>
+              </div>
+            </div>
+
+            <div class="db-row" data-search="aws credit card">
+              <div class="db-cell db-cell-icon">💳</div>
+              <div class="db-cell"><span class="db-cell-name">AWS Billing Credit Card</span><br><span class="db-cell-secondary">•••• 4421 · exp 09/27</span></div>
+              <div class="db-cell"><span class="tag tag-green">📦 Finance</span></div>
+              <div class="db-cell"><span class="tag tag-gray">card</span></div>
+              <div class="db-cell db-cell-secondary">2 weeks ago</div>
+              <div class="db-cell db-cell-actions">
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">📋</button>
+                <button class="btn btn-icon btn-ghost btn-sm" onclick="event.stopPropagation()">⋯</button>
+              </div>
+            </div>
+
+            <div class="db-add-row" onclick="openModal('createModal')">+ New item</div>
+          </div>
+
+          <div class="db-count">Count: 8</div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ====================================================================
+     SCREEN: ITEM DETAIL (Notion page style)
+     ==================================================================== -->
+<div class="screen" id="screen-detail">
+  <div class="app">
+    <aside class="sidebar">
+      <div class="workspace-switcher">
+        <button class="workspace-button">
+          <div class="workspace-avatar">i</div>
+          <div class="workspace-meta">
+            <div class="workspace-name">iux24</div>
+            <div class="workspace-plan">Business</div>
+          </div>
+        </button>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-item" onclick="showScreen('dashboard')">
+          <span class="toggle-arrow"></span>
+          <span class="icon">📋</span>
+          <span class="label">All items</span>
+        </div>
+        <div class="sidebar-item active">
+          <span class="toggle-arrow">▼</span>
+          <span class="icon">📦</span>
+          <span class="label">Production</span>
+        </div>
+        <div class="sidebar-children">
+          <div class="sidebar-item">
+            <span class="toggle-arrow">▼</span>
+            <span class="icon">📁</span>
+            <span class="label">AWS</span>
+          </div>
+          <div class="sidebar-children">
+            <div class="sidebar-item active">
+              <span class="toggle-arrow"></span>
+              <span class="icon">🔑</span>
+              <span class="label">AWS Production Root</span>
+            </div>
+            <div class="sidebar-item">
+              <span class="toggle-arrow"></span>
+              <span class="icon">🔑</span>
+              <span class="label">DevOps IAM</span>
+            </div>
+          </div>
+          <div class="sidebar-item">
+            <span class="toggle-arrow">▶</span>
+            <span class="icon">📁</span>
+            <span class="label">Databases</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="main-topbar">
+        <div class="breadcrumb">
+          <span class="breadcrumb-item" onclick="showScreen('dashboard')">iux24</span>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-item">📦 Production</span>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-item">📁 AWS</span>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-item current">🔑 AWS Production Root</span>
+        </div>
+        <div class="topbar-actions">
+          <button class="topbar-btn" onclick="copyValue('K9$mP2#vN8xQ@4wL!7zR')">📋 Copy password</button>
+          <button class="topbar-btn primary" onclick="openModal('sendModal')">📤 Send</button>
+          <button class="topbar-btn">⋯</button>
+        </div>
+      </div>
+
+      <div class="page">
+        <div class="page-cover"></div>
+        <div class="page-icon">🔑</div>
+        <h1 class="page-title">AWS Production Root Account</h1>
+
+        <div class="properties">
+          <div class="property">
+            <div class="property-label"><span class="property-icon">⌗</span>Vault</div>
+            <div class="property-value"><span class="tag tag-red">📦 Production</span></div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">📁</span>Folder</div>
+            <div class="property-value">AWS</div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">🏷</span>Tags</div>
+            <div class="property-value">
+              <span class="tag-stack">
+                <span class="tag tag-orange">aws</span>
+                <span class="tag tag-red">root</span>
+                <span class="tag tag-red">production</span>
+              </span>
+            </div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">⚠</span>Status</div>
+            <div class="property-value"><span class="tag tag-yellow tag-dot">Privileged</span></div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">🔒</span>Encryption</div>
+            <div class="property-value"><span class="tag tag-green tag-dot">Zero-knowledge · AES-256-GCM</span></div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">👤</span>Owner</div>
+            <div class="property-value"><span class="avatar-circle" style="display:inline-flex; vertical-align:middle; margin-right:6px;">C</span>ching@iux24.com</div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">📅</span>Last modified</div>
+            <div class="property-value">May 10, 2026 09:15 by ching@</div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">🔄</span>Rotation</div>
+            <div class="property-value">Every 90 days · <span class="tag tag-green">Fresh (in 84 days)</span></div>
+          </div>
+        </div>
+
+        <!-- Credentials toggle -->
+        <details class="toggle-block" open>
+          <summary class="toggle-header">
+            <span class="toggle-arrow">▶</span>
+            <span class="toggle-title">🔐 Credentials</span>
+          </summary>
+          <div class="toggle-content">
+            <div class="properties" style="margin-bottom: 0; border-bottom: none; padding-bottom: 0;">
+              <div class="property">
+                <div class="property-label"><span class="property-icon">👤</span>Username</div>
+                <div class="property-value text-mono">admin@iux24.com
+                  <button class="btn btn-icon btn-ghost btn-sm" style="margin-left: 8px;" onclick="copyValue('admin@iux24.com')">📋</button>
+                </div>
+              </div>
+              <div class="property">
+                <div class="property-label"><span class="property-icon">🔑</span>Password</div>
+                <div class="property-value text-mono" id="pwdField">••••••••••••••••••
+                  <button class="btn btn-icon btn-ghost btn-sm" style="margin-left: 8px;" onclick="togglePwd()">👁</button>
+                  <button class="btn btn-icon btn-ghost btn-sm" onclick="copyValue('K9$mP2#vN8xQ@4wL!7zR')">📋</button>
+                </div>
+              </div>
+              <div class="property">
+                <div class="property-label"><span class="property-icon">🌐</span>Website</div>
+                <div class="property-value"><a href="#" style="color: var(--blue); text-decoration: none;">https://console.aws.amazon.com</a></div>
+              </div>
+              <div class="property">
+                <div class="property-label"><span class="property-icon">🔢</span>TOTP (2FA)</div>
+                <div class="property-value">
+                  <div class="totp-display">
+                    <span class="totp-code" id="totpCode">392 481</span>
+                    <svg class="totp-ring" viewBox="0 0 24 24">
+                      <circle class="bg" cx="12" cy="12" r="10"/>
+                      <circle class="fg" cx="12" cy="12" r="10" stroke-dasharray="60 62.8" id="totpRing"/>
+                    </svg>
+                    <span class="totp-seconds" id="totpSec">18s</span>
+                    <button class="btn btn-icon btn-ghost btn-sm" onclick="copyValue(document.getElementById('totpCode').innerText)">📋</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <!-- Notes -->
+        <h2 class="h2">📝 Notes</h2>
+        <p class="text">MFA hardware key อยู่ที่ตู้เซฟชั้น 3</p>
+        <p class="text">Billing alert ตั้งไว้ที่ <strong>$5,000/เดือน</strong></p>
+        <p class="text">Account ID: <code class="inline">123456789012</code></p>
+
+        <!-- Attachments -->
+        <details class="toggle-block">
+          <summary class="toggle-header">
+            <span class="toggle-arrow">▶</span>
+            <span class="toggle-title">🔗 Attachments (2)</span>
+          </summary>
+          <div class="toggle-content">
+            <div style="display: flex; align-items: center; gap: 10px; padding: 8px; background: var(--bg-secondary); border-radius: var(--radius); margin-bottom: 6px;">
+              <span style="font-size: 18px;">📄</span>
+              <div style="flex: 1;">
+                <div style="font-size: 14px;">root-mfa-backup-codes.txt</div>
+                <div style="font-size: 12px; color: var(--text-tertiary);">Encrypted · 1.2 KB</div>
+              </div>
+              <button class="btn btn-sm">⬇ Download</button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px; padding: 8px; background: var(--bg-secondary); border-radius: var(--radius);">
+              <span style="font-size: 18px;">📑</span>
+              <div style="flex: 1;">
+                <div style="font-size: 14px;">account-setup.pdf</div>
+                <div style="font-size: 12px; color: var(--text-tertiary);">Encrypted · 245 KB</div>
+              </div>
+              <button class="btn btn-sm">⬇ Download</button>
+            </div>
+          </div>
+        </details>
+
+        <!-- Access -->
+        <details class="toggle-block" open>
+          <summary class="toggle-header">
+            <span class="toggle-arrow">▶</span>
+            <span class="toggle-title">👥 Who can access</span>
+          </summary>
+          <div class="toggle-content">
+            <div class="access-row">
+              <div class="avatar-circle">C</div>
+              <div class="access-info">
+                <div class="access-name">ching@iux24.com</div>
+                <div class="access-role">Owner · all permissions</div>
+              </div>
+              <span class="tag tag-purple">👑 Owner</span>
+            </div>
+            <div class="access-row">
+              <div class="avatar-circle team">DO</div>
+              <div class="access-info">
+                <div class="access-name">DevOps Team · 5 members</div>
+                <div class="access-role">via Google Group sync</div>
+              </div>
+              <span class="tag tag-blue">Editor</span>
+            </div>
+            <div class="access-row">
+              <div class="avatar-circle">J</div>
+              <div class="access-info">
+                <div class="access-name">john@iux24.com</div>
+                <div class="access-role">Expires Jun 1, 2026</div>
+              </div>
+              <span class="tag tag-yellow">Viewer · temp</span>
+            </div>
+            <div class="access-row">
+              <div class="avatar-circle guest">EX</div>
+              <div class="access-info">
+                <div class="access-name">contractor@external.com</div>
+                <div class="access-role">via one-time send</div>
+              </div>
+              <span class="tag tag-orange">Guest</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" style="margin-top: 8px;" onclick="openModal('shareModal')">+ Share with someone</button>
+          </div>
+        </details>
+
+        <!-- Activity -->
+        <details class="toggle-block" open>
+          <summary class="toggle-header">
+            <span class="toggle-arrow">▶</span>
+            <span class="toggle-title">📊 Recent activity</span>
+          </summary>
+          <div class="toggle-content">
+            <div class="activity-row">
+              <div class="activity-dot view"></div>
+              <div style="flex: 1;">
+                <div><strong>john@iux24.com</strong> viewed password</div>
+                <div class="activity-meta">10:23 · from MacBook · Bangkok</div>
+              </div>
+            </div>
+            <div class="activity-row">
+              <div class="activity-dot edit"></div>
+              <div style="flex: 1;">
+                <div><strong>ching@iux24.com</strong> updated TOTP secret</div>
+                <div class="activity-meta">09:15</div>
+              </div>
+            </div>
+            <div class="activity-row">
+              <div class="activity-dot share"></div>
+              <div style="flex: 1;">
+                <div><strong>ching@</strong> sent one-time copy to contractor@external.com</div>
+                <div class="activity-meta">Yesterday 16:42</div>
+              </div>
+            </div>
+            <div class="activity-row">
+              <div class="activity-dot view"></div>
+              <div style="flex: 1;">
+                <div><strong>DevOps team</strong> · 3 views from 2 members</div>
+                <div class="activity-meta">2 days ago</div>
+              </div>
+            </div>
+            <button class="btn btn-ghost btn-sm" style="margin-top: 8px;" onclick="showScreen('audit')">View full audit log →</button>
+          </div>
+        </details>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ====================================================================
+     SCREEN: MEMBERS
+     ==================================================================== -->
+<div class="screen" id="screen-members">
+  <div class="app">
+    <aside class="sidebar">
+      <div class="workspace-switcher">
+        <button class="workspace-button">
+          <div class="workspace-avatar">i</div>
+          <div class="workspace-meta">
+            <div class="workspace-name">iux24</div>
+            <div class="workspace-plan">Business · 24 members</div>
+          </div>
+        </button>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-item" onclick="showScreen('dashboard')">
+          <span class="toggle-arrow"></span><span class="icon">📋</span><span class="label">All items</span>
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-section-label"><span>Admin</span></div>
+        <div class="sidebar-item active">
+          <span class="toggle-arrow"></span><span class="icon">👤</span><span class="label">Members</span><span class="count">24</span>
+        </div>
+        <div class="sidebar-item">
+          <span class="toggle-arrow"></span><span class="icon">👥</span><span class="label">Teams</span><span class="count">3</span>
+        </div>
+        <div class="sidebar-item" onclick="showScreen('audit')">
+          <span class="toggle-arrow"></span><span class="icon">📊</span><span class="label">Audit log</span>
+        </div>
+        <div class="sidebar-item" onclick="showScreen('sso')">
+          <span class="toggle-arrow"></span><span class="icon">🔑</span><span class="label">SSO settings</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="main-topbar">
+        <div class="breadcrumb">
+          <span class="breadcrumb-item" onclick="showScreen('dashboard')">iux24</span>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-item">Admin</span>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-item current">👤 Members</span>
+        </div>
+        <div class="topbar-actions">
+          <button class="topbar-btn">⬇ Export</button>
+          <button class="btn btn-primary btn-sm" onclick="openModal('inviteModal')">+ Invite</button>
+        </div>
+      </div>
+
+      <div class="page page-wide">
+        <div class="page-icon">👤</div>
+        <h1 class="page-title">Members</h1>
+        <p class="text text-muted">จัดการสมาชิกและสิทธิ์การเข้าถึง · เชื่อมต่อ Google Workspace</p>
+
+        <div class="callout callout-green">
+          <div class="callout-icon">⚡</div>
+          <div class="callout-body">
+            <strong>JIT Provisioning enabled</strong> · สมาชิกใหม่ที่ login ด้วย <code class="inline">@iux24.com</code> Google account จะถูก auto-create
+            พร้อม role <strong>Member</strong> และ join team ตาม Google Groups ที่ map ไว้
+          </div>
+        </div>
+
+        <div class="database">
+          <div class="database-header">
+            <div class="database-views">
+              <span class="database-view active">📋 Table</span>
+              <span class="database-view">🎴 Board (by role)</span>
+            </div>
+            <div class="database-toolbar">
+              <button class="database-filter active">All (24)</button>
+              <button class="database-filter">Active (22)</button>
+              <button class="database-filter">Invited (2)</button>
+            </div>
+          </div>
+
+          <div class="db-table">
+            <div class="db-row db-header" style="grid-template-columns: 1fr 140px 220px 130px 60px;">
+              <div class="db-cell">Aa Member</div>
+              <div class="db-cell">🏷 Role</div>
+              <div class="db-cell">👥 Teams</div>
+              <div class="db-cell">📅 Last active</div>
+              <div class="db-cell"></div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 1fr 140px 220px 130px 60px;">
+              <div class="db-cell">
+                <div style="display:flex; align-items:center; gap: 8px;">
+                  <div class="avatar-circle">C</div>
+                  <div>
+                    <div class="db-cell-name">Ching Chanapolcha</div>
+                    <div class="db-cell-secondary">ching@iux24.com · via Google SSO</div>
+                  </div>
+                </div>
+              </div>
+              <div class="db-cell"><span class="tag tag-purple tag-dot">Owner</span></div>
+              <div class="db-cell"><span class="tag-stack"><span class="tag tag-blue">DevOps</span><span class="tag tag-green">Finance</span></span></div>
+              <div class="db-cell"><span class="tag tag-green tag-dot">Active now</span></div>
+              <div class="db-cell db-cell-actions"><button class="btn btn-icon btn-ghost btn-sm">⋯</button></div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 1fr 140px 220px 130px 60px;">
+              <div class="db-cell">
+                <div style="display:flex; align-items:center; gap: 8px;">
+                  <div class="avatar-circle" style="background: linear-gradient(135deg, #34a853, #1e8e3e);">J</div>
+                  <div>
+                    <div class="db-cell-name">John Taylor</div>
+                    <div class="db-cell-secondary">john@iux24.com · via Google SSO</div>
+                  </div>
+                </div>
+              </div>
+              <div class="db-cell"><span class="tag tag-blue tag-dot">Admin</span></div>
+              <div class="db-cell"><span class="tag tag-blue">DevOps</span></div>
+              <div class="db-cell db-cell-secondary">10 min ago</div>
+              <div class="db-cell db-cell-actions"><button class="btn btn-icon btn-ghost btn-sm">⋯</button></div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 1fr 140px 220px 130px 60px;">
+              <div class="db-cell">
+                <div style="display:flex; align-items:center; gap: 8px;">
+                  <div class="avatar-circle">S</div>
+                  <div>
+                    <div class="db-cell-name">Somchai K.</div>
+                    <div class="db-cell-secondary">somchai@iux24.com · via Google SSO</div>
+                  </div>
+                </div>
+              </div>
+              <div class="db-cell"><span class="tag tag-gray">Member</span></div>
+              <div class="db-cell"><span class="tag tag-blue">DevOps</span></div>
+              <div class="db-cell db-cell-secondary">2 hours ago</div>
+              <div class="db-cell db-cell-actions"><button class="btn btn-icon btn-ghost btn-sm">⋯</button></div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 1fr 140px 220px 130px 60px;">
+              <div class="db-cell">
+                <div style="display:flex; align-items:center; gap: 8px;">
+                  <div class="avatar-circle">N</div>
+                  <div>
+                    <div class="db-cell-name">Niran M.</div>
+                    <div class="db-cell-secondary">niran@iux24.com · via Google SSO</div>
+                  </div>
+                </div>
+              </div>
+              <div class="db-cell"><span class="tag tag-gray">Member</span></div>
+              <div class="db-cell"><span class="tag tag-orange">Marketing</span></div>
+              <div class="db-cell db-cell-secondary">Yesterday</div>
+              <div class="db-cell db-cell-actions"><button class="btn btn-icon btn-ghost btn-sm">⋯</button></div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 1fr 140px 220px 130px 60px;">
+              <div class="db-cell">
+                <div style="display:flex; align-items:center; gap: 8px;">
+                  <div class="avatar-circle">P</div>
+                  <div>
+                    <div class="db-cell-name">Praew R.</div>
+                    <div class="db-cell-secondary">praew@iux24.com · password + 2FA</div>
+                  </div>
+                </div>
+              </div>
+              <div class="db-cell"><span class="tag tag-gray">Member</span></div>
+              <div class="db-cell"><span class="tag tag-green">Finance</span></div>
+              <div class="db-cell db-cell-secondary">3 days ago</div>
+              <div class="db-cell db-cell-actions"><button class="btn btn-icon btn-ghost btn-sm">⋯</button></div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 1fr 140px 220px 130px 60px; opacity: 0.7;">
+              <div class="db-cell">
+                <div style="display:flex; align-items:center; gap: 8px;">
+                  <div class="avatar-circle guest">EX</div>
+                  <div>
+                    <div class="db-cell-name">contractor@external.com</div>
+                    <div class="db-cell-secondary">External · invited 2 days ago</div>
+                  </div>
+                </div>
+              </div>
+              <div class="db-cell"><span class="tag tag-orange tag-dot">Guest</span></div>
+              <div class="db-cell db-cell-secondary">—</div>
+              <div class="db-cell"><span class="tag tag-yellow">Pending</span></div>
+              <div class="db-cell db-cell-actions"><button class="btn btn-icon btn-ghost btn-sm">⋯</button></div>
+            </div>
+          </div>
+          <div class="db-count">Count: 6 of 24</div>
+        </div>
+
+        <div class="callout callout-yellow">
+          <div class="callout-icon">⚠</div>
+          <div class="callout-body">
+            <strong>เมื่อลบสมาชิก:</strong> ระบบจะ rotate vault keys ของทุก vault ที่สมาชิกคนนี้เคยเข้าถึงโดยอัตโนมัติ
+            (ประมาณ 30 วินาทีสำหรับ org ขนาดกลาง)
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ====================================================================
+     SCREEN: AUDIT LOG
+     ==================================================================== -->
+<div class="screen" id="screen-audit">
+  <div class="app">
+    <aside class="sidebar">
+      <div class="workspace-switcher">
+        <button class="workspace-button">
+          <div class="workspace-avatar">i</div>
+          <div class="workspace-meta">
+            <div class="workspace-name">iux24</div>
+            <div class="workspace-plan">Business</div>
+          </div>
+        </button>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-item" onclick="showScreen('dashboard')">
+          <span class="toggle-arrow"></span><span class="icon">📋</span><span class="label">All items</span>
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-section-label"><span>Admin</span></div>
+        <div class="sidebar-item" onclick="showScreen('members')">
+          <span class="toggle-arrow"></span><span class="icon">👤</span><span class="label">Members</span>
+        </div>
+        <div class="sidebar-item active">
+          <span class="toggle-arrow"></span><span class="icon">📊</span><span class="label">Audit log</span>
+        </div>
+        <div class="sidebar-item" onclick="showScreen('sso')">
+          <span class="toggle-arrow"></span><span class="icon">🔑</span><span class="label">SSO settings</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="main-topbar">
+        <div class="breadcrumb">
+          <span class="breadcrumb-item" onclick="showScreen('dashboard')">iux24</span>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-item">Admin</span>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-item current">📊 Audit log</span>
+        </div>
+        <div class="topbar-actions">
+          <button class="topbar-btn">⬇ Export CSV</button>
+          <button class="topbar-btn">📡 SIEM</button>
+        </div>
+      </div>
+
+      <div class="page page-wide">
+        <div class="page-icon">📊</div>
+        <h1 class="page-title">Audit log</h1>
+        <p class="text text-muted">บันทึก action ทั้งหมดใน workspace · เก็บ 3 ปี · streaming-ready</p>
+
+        <div class="properties">
+          <div class="property">
+            <div class="property-label"><span class="property-icon">📊</span>Total events</div>
+            <div class="property-value">1,247 events (last 30 days)</div>
+          </div>
+          <div class="property">
+            <div class="property-label"><span class="property-icon">🔒</span>Retention</div>
+            <div class="property-value">3 years</div>
+          </div>
+        </div>
+
+        <div class="database">
+          <div class="database-header">
+            <div class="database-toolbar">
+              <button class="database-filter">Actor: All</button>
+              <button class="database-filter">Action: All</button>
+              <button class="database-filter active">📅 Last 7 days</button>
+              <button class="database-filter">🔍 Search</button>
+            </div>
+          </div>
+
+          <div class="db-table">
+            <div class="db-row db-header" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell">📅 Time</div>
+              <div class="db-cell">👤 Actor</div>
+              <div class="db-cell">⚡ Action</div>
+              <div class="db-cell">🎯 Target</div>
+              <div class="db-cell">🌐 IP</div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell text-mono db-cell-secondary">10:23:14</div>
+              <div class="db-cell"><div style="display:flex;align-items:center;gap:6px;"><div class="avatar-circle" style="width:20px;height:20px;font-size:10px;">J</div>john@</div></div>
+              <div class="db-cell"><span class="tag tag-blue">item.copy_password</span> "AWS Production Root"</div>
+              <div class="db-cell db-cell-secondary">📦 Production</div>
+              <div class="db-cell text-mono db-cell-secondary">10.0.•.•</div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell text-mono db-cell-secondary">10:22:48</div>
+              <div class="db-cell"><div style="display:flex;align-items:center;gap:6px;"><div class="avatar-circle" style="width:20px;height:20px;font-size:10px;">J</div>john@</div></div>
+              <div class="db-cell"><span class="tag tag-blue">item.view</span> "AWS Production Root"</div>
+              <div class="db-cell db-cell-secondary">📦 Production</div>
+              <div class="db-cell text-mono db-cell-secondary">10.0.•.•</div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell text-mono db-cell-secondary">10:15:02</div>
+              <div class="db-cell"><div style="display:flex;align-items:center;gap:6px;"><div class="avatar-circle" style="width:20px;height:20px;font-size:10px;">C</div>ching@</div></div>
+              <div class="db-cell"><span class="tag tag-yellow">send.create</span> 1h TTL · burn-after-read</div>
+              <div class="db-cell db-cell-secondary">→ contractor@external.com</div>
+              <div class="db-cell text-mono db-cell-secondary">203.150.•.•</div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell text-mono db-cell-secondary">09:15:32</div>
+              <div class="db-cell"><div style="display:flex;align-items:center;gap:6px;"><div class="avatar-circle" style="width:20px;height:20px;font-size:10px;">C</div>ching@</div></div>
+              <div class="db-cell"><span class="tag tag-yellow">item.update</span> TOTP rotated on "AWS Production Root"</div>
+              <div class="db-cell db-cell-secondary">📦 Production</div>
+              <div class="db-cell text-mono db-cell-secondary">203.150.•.•</div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell text-mono db-cell-secondary">09:14:08</div>
+              <div class="db-cell"><div style="display:flex;align-items:center;gap:6px;"><div class="avatar-circle" style="width:20px;height:20px;font-size:10px;">C</div>ching@</div></div>
+              <div class="db-cell"><span class="tag tag-green">auth.login</span> Google SSO + TOTP · MacBook Pro</div>
+              <div class="db-cell db-cell-secondary">Bangkok, TH</div>
+              <div class="db-cell text-mono db-cell-secondary">203.150.•.•</div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell db-cell-secondary">Yesterday</div>
+              <div class="db-cell"><div style="display:flex;align-items:center;gap:6px;"><div class="avatar-circle" style="width:20px;height:20px;font-size:10px;">S</div>somchai@</div></div>
+              <div class="db-cell"><span class="tag tag-red">auth.failed_2fa</span> Incorrect TOTP × 1</div>
+              <div class="db-cell db-cell-secondary">—</div>
+              <div class="db-cell text-mono db-cell-secondary">10.0.•.•</div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell db-cell-secondary">Yesterday</div>
+              <div class="db-cell"><div style="display:flex;align-items:center;gap:6px;"><div class="avatar-circle" style="width:20px;height:20px;font-size:10px;">C</div>ching@</div></div>
+              <div class="db-cell"><span class="tag tag-purple">vault.share</span> Added DevOps Team to "Production" (Editor)</div>
+              <div class="db-cell db-cell-secondary">📦 Production</div>
+              <div class="db-cell text-mono db-cell-secondary">203.150.•.•</div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell db-cell-secondary">Yesterday</div>
+              <div class="db-cell"><div style="display:flex;align-items:center;gap:6px;"><div class="avatar-circle" style="width:20px;height:20px;font-size:10px;">C</div>ching@</div></div>
+              <div class="db-cell"><span class="tag tag-orange">member.invite</span> contractor@external.com as Guest</div>
+              <div class="db-cell db-cell-secondary">External</div>
+              <div class="db-cell text-mono db-cell-secondary">203.150.•.•</div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell db-cell-secondary">2 days ago</div>
+              <div class="db-cell"><div style="display:flex;align-items:center;gap:6px;"><div class="avatar-circle guest" style="width:20px;height:20px;font-size:10px;">EX</div>contractor@</div></div>
+              <div class="db-cell"><span class="tag tag-gray">send.view</span> Opened one-time secret</div>
+              <div class="db-cell db-cell-secondary">→ burned</div>
+              <div class="db-cell text-mono db-cell-secondary">8.8.•.•</div>
+            </div>
+
+            <div class="db-row" style="grid-template-columns: 130px 200px 1fr 200px 80px;">
+              <div class="db-cell db-cell-secondary">3 days ago</div>
+              <div class="db-cell"><div style="display:flex;align-items:center;gap:6px;"><div class="avatar-circle" style="width:20px;height:20px;font-size:10px;">⚙</div>system</div></div>
+              <div class="db-cell"><span class="tag tag-green">sso.jit_provision</span> Auto-created praew@iux24.com from Google Workspace</div>
+              <div class="db-cell db-cell-secondary">New user</div>
+              <div class="db-cell text-mono db-cell-secondary">—</div>
+            </div>
+          </div>
+          <div class="db-count">Showing 10 of 1,247 · <a href="#" style="color: var(--blue); text-decoration: none;">Load more →</a></div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ====================================================================
+     SCREEN: SSO SETTINGS
+     ==================================================================== -->
+<div class="screen" id="screen-sso">
+  <div class="app">
+    <aside class="sidebar">
+      <div class="workspace-switcher">
+        <button class="workspace-button">
+          <div class="workspace-avatar">i</div>
+          <div class="workspace-meta">
+            <div class="workspace-name">iux24</div>
+            <div class="workspace-plan">Business</div>
+          </div>
+        </button>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-item" onclick="showScreen('dashboard')">
+          <span class="toggle-arrow"></span><span class="icon">📋</span><span class="label">All items</span>
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-section-label"><span>Admin</span></div>
+        <div class="sidebar-item" onclick="showScreen('members')">
+          <span class="toggle-arrow"></span><span class="icon">👤</span><span class="label">Members</span>
+        </div>
+        <div class="sidebar-item" onclick="showScreen('audit')">
+          <span class="toggle-arrow"></span><span class="icon">📊</span><span class="label">Audit log</span>
+        </div>
+        <div class="sidebar-item active">
+          <span class="toggle-arrow"></span><span class="icon">🔑</span><span class="label">SSO settings</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="main-topbar">
+        <div class="breadcrumb">
+          <span class="breadcrumb-item" onclick="showScreen('dashboard')">iux24</span>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-item">Admin</span>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-item current">🔑 SSO settings</span>
+        </div>
+      </div>
+
+      <div class="page">
+        <div class="page-icon">🔑</div>
+        <h1 class="page-title">SSO & identity</h1>
+        <p class="text text-muted">กำหนดวิธี login + domain ที่อนุญาต + group mapping</p>
+
+        <div class="divider"></div>
+
+        <!-- Connected Providers -->
+        <h2 class="h2">🔌 Connected providers</h2>
+        <p class="text text-muted text-small">SSO providers ที่ workspace นี้เชื่อมต่ออยู่</p>
+
+        <div class="sso-provider" style="margin-top: 12px;">
+          <div class="sso-provider-icon">
+            <svg viewBox="0 0 24 24" width="20" height="20">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+            </svg>
+          </div>
+          <div class="sso-provider-info">
+            <div class="sso-provider-name">Google Workspace</div>
+            <div class="sso-provider-status">
+              <span class="status-indicator"></span>Connected · iux24.com · 22 of 24 via SSO
+            </div>
+          </div>
+          <button class="btn btn-sm">⚙ Configure</button>
+        </div>
+        <div class="sso-provider" style="opacity: 0.5;">
+          <div class="sso-provider-icon" style="background: #0078d4;">
+            <span style="font-size: 16px; font-weight: 700; color: white;">M</span>
+          </div>
+          <div class="sso-provider-info">
+            <div class="sso-provider-name">Microsoft Entra ID</div>
+            <div class="sso-provider-status">Not connected</div>
+          </div>
+          <button class="btn btn-sm">+ Connect</button>
+        </div>
+        <div class="sso-provider" style="opacity: 0.5;">
+          <div class="sso-provider-icon" style="background: #00b3a6;">
+            <span style="font-size: 13px; font-weight: 700; color: white;">OK</span>
+          </div>
+          <div class="sso-provider-info">
+            <div class="sso-provider-name">Okta (SAML 2.0)</div>
+            <div class="sso-provider-status">Not connected</div>
+          </div>
+          <button class="btn btn-sm">+ Connect</button>
+        </div>
+
+        <!-- Allowed Domains -->
+        <h2 class="h2">🌐 Allowed email domains</h2>
+        <p class="text text-muted text-small">เฉพาะอีเมลในโดเมนที่ verify แล้วเท่านั้นที่ login ได้</p>
+
+        <div style="margin-top: 12px;">
+          <div class="domain-card verified">
+            <span>✓</span>
+            <div style="flex: 1;">
+              <div style="font-weight: 600;">iux24.com</div>
+              <div style="font-size: 12px; color: var(--tag-green); margin-top: 2px; font-family: inherit;">Verified · Primary · linked to Google Workspace</div>
+            </div>
+            <span class="tag tag-green">Primary</span>
+          </div>
+
+          <div class="domain-card verified">
+            <span>✓</span>
+            <div style="flex: 1;">
+              <div style="font-weight: 600;">iux24.co.th</div>
+              <div style="font-size: 12px; color: var(--tag-green); margin-top: 2px; font-family: inherit;">Verified Dec 15, 2025 · 4 users</div>
+            </div>
+            <button class="btn btn-icon btn-ghost btn-sm">⚙</button>
+          </div>
+
+          <div class="domain-card pending">
+            <span>⏳</span>
+            <div style="flex: 1;">
+              <div style="font-weight: 600;">iux24-partner.com</div>
+              <div style="font-size: 12px; color: var(--tag-yellow); margin-top: 2px; font-family: inherit;">Pending · Add TXT record to DNS</div>
+              <div class="verify-record">
+                <span class="verify-record-label">TXT</span>
+                <span>woxa-verify=k8n3p2q9z7m4x1v6b8c5d2f7</span>
+                <button class="btn btn-icon btn-ghost btn-sm" style="margin-left: auto;">📋</button>
+              </div>
+            </div>
+            <button class="btn btn-sm">Verify</button>
+          </div>
+
+          <button class="btn btn-block btn-ghost" style="margin-top: 12px;">+ Add domain</button>
+        </div>
+
+        <!-- JIT Provisioning -->
+        <h2 class="h2">⚡ JIT provisioning</h2>
+        <p class="text text-muted text-small">สมาชิกใหม่ที่ login ผ่าน Google Workspace จะถูกสร้าง account อัตโนมัติ</p>
+
+        <div class="settings-section" style="margin-top: 12px;">
+          <div class="settings-row">
+            <div class="settings-row-info">
+              <div class="settings-row-title">Auto-create users on first sign-in</div>
+              <div class="settings-row-desc">@iux24.com login ได้ทันที โดยไม่ต้องส่ง invite</div>
+            </div>
+            <div class="switch on" onclick="this.classList.toggle('on')"></div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-info">
+              <div class="settings-row-title">Default role for new users</div>
+              <div class="settings-row-desc">บทบาทเริ่มต้นเมื่อ JIT provision</div>
+            </div>
+            <select class="input" style="width: auto;">
+              <option>Member (recommended)</option>
+              <option>Viewer</option>
+              <option>Guest</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-info">
+              <div class="settings-row-title">Default vault</div>
+              <div class="settings-row-desc">vault ที่ user ใหม่จะได้สิทธิ์เห็นทันที</div>
+            </div>
+            <span class="tag tag-blue">📦 Shared</span>
+          </div>
+        </div>
+
+        <!-- Google Groups Mapping -->
+        <h2 class="h2">👥 Google Groups → Woxa Teams</h2>
+        <p class="text text-muted text-small">Sync membership อัตโนมัติ</p>
+
+        <div style="margin-top: 12px;">
+          <div class="group-mapping">
+            <div>
+              <div style="font-size: 12px; color: var(--text-tertiary);">Google Group</div>
+              <div class="text-mono" style="font-size: 13px;">devops@iux24.com</div>
+            </div>
+            <div class="group-mapping-arrow">→</div>
+            <div>
+              <div style="font-size: 12px; color: var(--text-tertiary);">Woxa Team</div>
+              <div>👥 DevOps</div>
+            </div>
+            <button class="btn btn-icon btn-ghost btn-sm">⋯</button>
+          </div>
+          <div class="group-mapping">
+            <div>
+              <div style="font-size: 12px; color: var(--text-tertiary);">Google Group</div>
+              <div class="text-mono" style="font-size: 13px;">marketing@iux24.com</div>
+            </div>
+            <div class="group-mapping-arrow">→</div>
+            <div>
+              <div style="font-size: 12px; color: var(--text-tertiary);">Woxa Team</div>
+              <div>👥 Marketing</div>
+            </div>
+            <button class="btn btn-icon btn-ghost btn-sm">⋯</button>
+          </div>
+          <div class="group-mapping">
+            <div>
+              <div style="font-size: 12px; color: var(--text-tertiary);">Google Group</div>
+              <div class="text-mono" style="font-size: 13px;">finance@iux24.com</div>
+            </div>
+            <div class="group-mapping-arrow">→</div>
+            <div>
+              <div style="font-size: 12px; color: var(--text-tertiary);">Woxa Team</div>
+              <div>👥 Finance</div>
+            </div>
+            <button class="btn btn-icon btn-ghost btn-sm">⋯</button>
+          </div>
+          <button class="btn btn-block btn-ghost" style="margin-top: 8px;">+ Add mapping</button>
+        </div>
+
+        <!-- Security Policy -->
+        <h2 class="h2">🛡 Security policy</h2>
+        <p class="text text-muted text-small">บังคับใช้กับทุกสมาชิกใน workspace</p>
+
+        <div class="settings-section" style="margin-top: 12px;">
+          <div class="settings-row">
+            <div class="settings-row-info">
+              <div class="settings-row-title">Require SSO for all users</div>
+              <div class="settings-row-desc">ปิดการ login ด้วย password</div>
+            </div>
+            <div class="switch on" onclick="this.classList.toggle('on')"></div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-info">
+              <div class="settings-row-title">Require 2FA</div>
+              <div class="settings-row-desc">TOTP หรือ Passkey สำหรับทุกคน</div>
+            </div>
+            <div class="switch on" onclick="this.classList.toggle('on')"></div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-info">
+              <div class="settings-row-title">Require Passkey for Admin role</div>
+              <div class="settings-row-desc">Admin ต้องใช้ Passkey/WebAuthn (ไม่อนุญาต TOTP เท่านั้น)</div>
+            </div>
+            <div class="switch" onclick="this.classList.toggle('on')"></div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-info">
+              <div class="settings-row-title">Auto-lock idle session</div>
+              <div class="settings-row-desc">Lock vault หลัง idle</div>
+            </div>
+            <select class="input" style="width: auto;">
+              <option>15 นาที</option>
+              <option>5 นาที</option>
+              <option>30 นาที</option>
+              <option>1 ชั่วโมง</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ====================================================================
+     SCREEN: RECIPIENT VIEW
+     ==================================================================== -->
+<div class="screen" id="screen-recipient">
+  <div class="recipient-page">
+    <div class="recipient-card">
+      <div class="auth-logo">
+        <div class="auth-logo-icon">🔐</div>
+        <div class="auth-logo-text">Woxa Vault</div>
+      </div>
+
+      <h1 class="auth-title">มีคนส่ง secret ให้คุณ</h1>
+      <p class="auth-subtitle">via Woxa Vault · iux24.com</p>
+
+      <div class="recipient-sender">
+        <div class="avatar-circle">C</div>
+        <div style="flex: 1;"><strong>ching@iux24.com</strong> ส่ง secret มาให้คุณ</div>
+      </div>
+
+      <div class="callout callout-yellow">
+        <div class="callout-icon">⚠</div>
+        <div class="callout-body">
+          <strong>เปิดได้ครั้งเดียวเท่านั้น</strong> — หลังจากกด Reveal ระบบจะลบ secret ออกจาก server ทันที กรุณา copy เก็บไว้ก่อนปิดหน้านี้
+        </div>
+      </div>
+
+      <div class="properties" style="border-bottom: 1px solid var(--divider); padding-bottom: 12px;">
+        <div class="property">
+          <div class="property-label"><span class="property-icon">⏱</span>หมดอายุใน</div>
+          <div class="property-value"><span class="tag tag-yellow tag-dot" id="expireTime">42 นาที</span></div>
+        </div>
+        <div class="property">
+          <div class="property-label"><span class="property-icon">🔢</span>เปิดได้</div>
+          <div class="property-value">1 ครั้ง (burn after read)</div>
+        </div>
+        <div class="property">
+          <div class="property-label"><span class="property-icon">🔑</span>Passphrase</div>
+          <div class="property-value">❌ ไม่ต้อง</div>
+        </div>
+        <div class="property">
+          <div class="property-label"><span class="property-icon">🔒</span>Encryption</div>
+          <div class="property-value"><span class="tag tag-green tag-dot">AES-256-GCM zero-knowledge</span></div>
+        </div>
+      </div>
+
+      <div id="revealSection">
+        <button class="btn btn-primary btn-block btn-lg" onclick="revealSecret()" style="margin-top: 16px;">
+          🔓 Reveal secret
+        </button>
+        <p style="text-align: center; font-size: 12px; color: var(--text-tertiary); margin-top: 12px;">
+          🛡 Secret จะ decrypt ในเบราว์เซอร์ของคุณ · server ไม่เคยเห็น plaintext
+        </p>
+      </div>
+
+      <div id="secretSection" style="display: none;">
+        <h2 class="h3" style="margin-top: 20px;">🔓 Password (from AWS Production Root Account)</h2>
+        <div class="secret-box">
+          K9$mP2#vN8xQ@4wL!7zR
+          <button class="btn btn-sm" style="position: absolute; top: 8px; right: 8px;" onclick="copyValue('K9$mP2#vN8xQ@4wL!7zR')">📋 Copy</button>
+        </div>
+        <div class="callout callout-red" style="margin-top: 12px;">
+          <div class="callout-icon">🔥</div>
+          <div class="callout-body">
+            <strong>Secret นี้ถูกลบจาก server แล้ว</strong> · หน้านี้จะปิดอัตโนมัติใน <strong id="autoCloseTime">120</strong> วินาที
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================
+     MODALS
+     ==================================================================== -->
+
+<!-- Create Item Modal -->
+<div class="modal-overlay" id="createModal" onclick="closeOnBg(event, 'createModal')">
+  <div class="modal modal-wide" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">เพิ่ม Item ใหม่</div>
+        <div class="modal-subtitle">ทุกฟิลด์ถูก encrypt ก่อนส่งไป server</div>
+      </div>
+      <button class="btn btn-icon btn-ghost" onclick="closeModal('createModal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group">
+        <label class="field-label">ประเภท</label>
+        <div class="pill-group">
+          <button class="pill active">🔑 Login</button>
+          <button class="pill">🔐 API Key</button>
+          <button class="pill">🖥 SSH Key</button>
+          <button class="pill">📝 Note</button>
+          <button class="pill">💳 Card</button>
+          <button class="pill">🆔 Identity</button>
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">ชื่อ item</label>
+        <input class="input" placeholder="เช่น AWS Production Root" />
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+        <div class="field-group">
+          <label class="field-label">Username / Email</label>
+          <input class="input" placeholder="admin@example.com" />
+        </div>
+        <div class="field-group">
+          <label class="field-label">Website</label>
+          <input class="input" placeholder="https://..." />
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Password</label>
+        <div style="position: relative;">
+          <input class="input" type="password" placeholder="..." style="padding-right: 80px;" />
+          <div style="position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: flex; gap: 2px;">
+            <button class="btn btn-icon btn-ghost btn-sm" title="Generate">🎲</button>
+            <button class="btn btn-icon btn-ghost btn-sm" title="Show">👁</button>
+          </div>
+        </div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+        <div class="field-group">
+          <label class="field-label">Folder</label>
+          <select class="input">
+            <option>📦 Production / AWS</option>
+            <option>📦 Production / Databases</option>
+            <option>📦 Staging</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label">Tags</label>
+          <input class="input" placeholder="aws, root, production" />
+        </div>
+      </div>
+      <div class="callout callout-green">
+        <div class="callout-icon">🔒</div>
+        <div class="callout-body"><strong>End-to-end encrypted</strong> · AES-256-GCM · ทีม IT อ่านไม่ได้</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('createModal')">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="closeModal('createModal'); toast('success', '✓ บันทึก item แล้ว', 'Encrypted ด้วย AES-256-GCM')">🔒 Encrypt & Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Share Modal -->
+<div class="modal-overlay" id="shareModal" onclick="closeOnBg(event, 'shareModal')">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">Share "AWS Production Root"</div>
+        <div class="modal-subtitle">กับคนใน iux24 workspace</div>
+      </div>
+      <button class="btn btn-icon btn-ghost" onclick="closeModal('shareModal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group">
+        <label class="field-label">ส่งให้ใคร</label>
+        <input class="input" placeholder="พิมพ์อีเมล หรือเลือก team..." />
+      </div>
+      <div class="field-group">
+        <label class="field-label">ระดับสิทธิ์</label>
+        <div class="pill-group">
+          <button class="pill">👁 Viewer</button>
+          <button class="pill active">✏ Editor</button>
+          <button class="pill">⚙ Manager</button>
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">หมดอายุ</label>
+        <div class="pill-group">
+          <button class="pill active">ไม่หมดอายุ</button>
+          <button class="pill">7 วัน</button>
+          <button class="pill">30 วัน</button>
+          <button class="pill">90 วัน</button>
+        </div>
+      </div>
+      <div class="callout callout-blue">
+        <div class="callout-icon">ℹ</div>
+        <div class="callout-body">Vault key จะถูก wrap ด้วย public key ของผู้รับ → เห็น item ทันทีหลัง login</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('shareModal')">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="closeModal('shareModal'); toast('success', '✓ Shared สำเร็จ', 'ผู้รับจะเห็น item เมื่อ login')">🔗 Share</button>
+    </div>
+  </div>
+</div>
+
+<!-- Send Modal -->
+<div class="modal-overlay" id="sendModal" onclick="closeOnBg(event, 'sendModal')">
+  <div class="modal modal-wide" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">📤 Send one-time copy</div>
+        <div class="modal-subtitle">URL หมดอายุ + burn-after-read สำหรับคนนอก workspace</div>
+      </div>
+      <button class="btn btn-icon btn-ghost" onclick="closeModal('sendModal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group">
+        <label class="field-label">ส่งให้อีเมล (optional)</label>
+        <input class="input" type="email" placeholder="lock to email" value="contractor@external.com" />
+        <div class="field-hint">ถ้าใส่ → ผู้รับต้อง verify อีเมลก่อนเปิด · ถ้าเว้นว่าง → ใครก็เปิดได้ที่มี link</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+        <div class="field-group">
+          <label class="field-label">เปิดได้ภายใน</label>
+          <div class="pill-group">
+            <button class="pill">5m</button>
+            <button class="pill active">1h</button>
+            <button class="pill">1d</button>
+            <button class="pill">7d</button>
+          </div>
+        </div>
+        <div class="field-group">
+          <label class="field-label">จำนวนครั้ง</label>
+          <div class="pill-group">
+            <button class="pill active">1</button>
+            <button class="pill">3</button>
+            <button class="pill">5</button>
+          </div>
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Passphrase (optional)</label>
+        <input class="input" placeholder="เพิ่ม passphrase อีกชั้น" />
+        <div class="field-hint">แนะนำ: ส่ง URL ใน Slack, ส่ง passphrase ทาง SMS แยกช่องทาง</div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">เลือกฟิลด์ที่จะส่ง</label>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <label style="display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--bg-secondary); border-radius: var(--radius); cursor: pointer;">
+            <input type="checkbox" checked /> Password
+          </label>
+          <label style="display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--bg-secondary); border-radius: var(--radius); cursor: pointer;">
+            <input type="checkbox" /> Username
+          </label>
+          <label style="display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--bg-secondary); border-radius: var(--radius); cursor: pointer;">
+            <input type="checkbox" /> TOTP secret
+          </label>
+        </div>
+      </div>
+      <div class="callout callout-yellow">
+        <div class="callout-icon">⚠</div>
+        <div class="callout-body">ทุก action ถูกบันทึกใน audit log · ตัว secret ไม่ถูก log</div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('sendModal')">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="closeModal('sendModal'); toast('success', '✓ สร้าง URL แล้ว', 'คัดลอกไป clipboard · กดดูที่ Recipient tab'); setTimeout(() => showScreen('recipient'), 1200)">🔗 สร้าง URL</button>
+    </div>
+  </div>
+</div>
+
+<!-- Invite Member Modal -->
+<div class="modal-overlay" id="inviteModal" onclick="closeOnBg(event, 'inviteModal')">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">เชิญสมาชิกใหม่</div>
+        <div class="modal-subtitle">@iux24.com login ผ่าน Google ได้ทันที (JIT)</div>
+      </div>
+      <button class="btn btn-icon btn-ghost" onclick="closeModal('inviteModal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group">
+        <label class="field-label">อีเมล</label>
+        <textarea class="input" rows="3" placeholder="alice@iux24.com&#10;bob@iux24.com"></textarea>
+        <div class="field-hint">คั่นด้วย newline สำหรับหลายคน</div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">บทบาท</label>
+        <div class="pill-group">
+          <button class="pill active">Member</button>
+          <button class="pill">Admin</button>
+          <button class="pill">Guest</button>
+        </div>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Teams</label>
+        <input class="input" placeholder="เลือก team..." />
+      </div>
+      <div class="callout callout-blue">
+        <div class="callout-icon">ℹ</div>
+        <div class="callout-body">
+          @iux24.com → login ผ่าน Google ได้ทันที (ไม่ต้องคลิก link)<br>
+          โดเมนอื่น → ส่ง signed invitation link (7d expiry)
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('inviteModal')">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="closeModal('inviteModal'); toast('success', '✓ ส่งคำเชิญแล้ว', '2 emails sent')">📨 ส่งคำเชิญ</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script>
+  /* ============================================================
+     SCREEN ROUTING
+     ============================================================ */
+  const tabs = document.querySelectorAll('.demo-tab');
+  const screens = document.querySelectorAll('.screen');
+
+  function showScreen(name) {
+    tabs.forEach(t => t.classList.toggle('active', t.dataset.screen === name));
+    screens.forEach(s => s.classList.toggle('active', s.id === 'screen-' + name));
+    window.scrollTo(0, 0);
+  }
+  tabs.forEach(tab => tab.addEventListener('click', () => showScreen(tab.dataset.screen)));
+
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    const keys = { '1':'welcome','2':'setup','3':'login','4':'google','5':'twofa','6':'dashboard','7':'detail','8':'members','9':'audit','0':'sso' };
+    if (keys[e.key]) showScreen(keys[e.key]);
+    if (e.key === 'Escape') closeAllModals();
+  });
+
+  /* ============================================================
+     THEME — locked to light mode
+     ============================================================ */
+  document.documentElement.setAttribute('data-theme', 'light');
+  try { localStorage.removeItem('theme'); } catch (e) {}
+
+  /* ============================================================
+     TOASTS
+     ============================================================ */
+  function toast(type, title, message, duration = 3500) {
+    const container = document.getElementById('toast-container');
+    const t = document.createElement('div');
+    t.className = 'toast ' + type;
+    const icon = { success:'✓', warning:'⚠', error:'✕', info:'ℹ' }[type] || 'ℹ';
+    t.innerHTML = `
+      <span class="toast-icon">${icon}</span>
+      <div style="flex:1;">
+        <div class="toast-title">${title}</div>
+        ${message ? '<div class="toast-message">' + message + '</div>' : ''}
+      </div>
+    `;
+    container.appendChild(t);
+    setTimeout(() => {
+      t.style.opacity = '0';
+      t.style.transform = 'translateX(20px)';
+      t.style.transition = 'all 200ms';
+      setTimeout(() => t.remove(), 200);
+    }, duration);
+  }
+
+  /* ============================================================
+     MODALS
+     ============================================================ */
+  function openModal(id) { document.getElementById(id).classList.add('open'); }
+  function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+  function closeOnBg(e, id) { if (e.target.id === id) closeModal(id); }
+  function closeAllModals() { document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('open')); }
+
+  /* ============================================================
+     WORKSPACE DISCOVERY
+     ============================================================ */
+  function checkWorkspace(email) {
+    const result = document.getElementById('workspaceResult');
+    const domain = (email.split('@')[1] || '').toLowerCase();
+    if (['iux24.com', 'iux24.co.th'].includes(domain)) {
+      result.innerHTML = `
+        <div class="workspace-card">
+          <div class="workspace-card-avatar">i</div>
+          <div class="workspace-card-info">
+            <div class="workspace-card-name">iux24 Workspace</div>
+            <div class="workspace-card-domain">${domain} · 24 members</div>
+          </div>
+          <span class="tag tag-green tag-dot">Active</span>
+        </div>`;
+    } else if (domain) {
+      result.innerHTML = `
+        <div class="callout callout-yellow">
+          <div class="callout-icon">⚠</div>
+          <div class="callout-body">ไม่พบ workspace สำหรับ <strong>${domain}</strong> · สร้างใหม่ หรือใช้อีเมลที่ทำงาน</div>
+        </div>`;
+    } else {
+      result.innerHTML = '';
+    }
+  }
+
+  /* ============================================================
+     GOOGLE OAUTH MOCK
+     ============================================================ */
+  function googleSignIn(email) {
+    toast('info', '🔄 Authenticating…', 'Verifying Google ID token + domain');
+    setTimeout(() => showScreen('twofa'), 900);
+  }
+  function googleSignInRejected(email) {
+    toast('error', '✕ Access denied', `${email} ไม่อยู่ใน iux24.com workspace`, 5000);
+  }
+
+  /* ============================================================
+     ITEM INTERACTIONS
+     ============================================================ */
+  function copyValue(val) {
+    if (navigator.clipboard) navigator.clipboard.writeText(val).catch(() => {});
+    toast('success', '📋 Copied', 'Clipboard จะถูก clear ใน 30 วินาที');
+  }
+  function togglePwd() {
+    const f = document.getElementById('pwdField');
+    if (!f) return;
+    if (f.textContent.includes('•')) {
+      f.firstChild.textContent = 'K9$mP2#vN8xQ@4wL!7zR ';
+      toast('info', '👁 Password revealed', 'Auto-hide ใน 5 วินาที');
+      setTimeout(togglePwd, 5000);
+    } else {
+      f.firstChild.textContent = '•••••••••••••••••• ';
+    }
+  }
+  function filterItems(type, el) {
+    document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+    el.classList.add('active');
+  }
+
+  /* ============================================================
+     RECIPIENT REVEAL
+     ============================================================ */
+  function revealSecret() {
+    document.getElementById('revealSection').style.display = 'none';
+    document.getElementById('secretSection').style.display = 'block';
+    toast('warning', '🔥 Secret burned', 'ลบจาก server แล้ว');
+    let t = 120;
+    const ti = setInterval(() => {
+      t--;
+      const el = document.getElementById('autoCloseTime');
+      if (el) el.textContent = t;
+      if (t <= 0) clearInterval(ti);
+    }, 1000);
+  }
+
+  /* ============================================================
+     TOTP COUNTDOWN
+     ============================================================ */
+  let totpSecLeft = 18;
+  setInterval(() => {
+    totpSecLeft--;
+    if (totpSecLeft <= 0) {
+      totpSecLeft = 30;
+      const codes = ['392 481', '847 192', '503 728', '186 940', '724 015'];
+      const el = document.getElementById('totpCode');
+      if (el) el.textContent = codes[Math.floor(Math.random() * codes.length)];
+    }
+    const secEl = document.getElementById('totpSec');
+    if (secEl) secEl.textContent = totpSecLeft + 's';
+    const ring = document.getElementById('totpRing');
+    if (ring) {
+      const c = 2 * Math.PI * 10;
+      const offset = c * (1 - totpSecLeft / 30);
+      ring.setAttribute('stroke-dasharray', `${c - offset} ${c}`);
+    }
+  }, 1000);
+
+  /* ============================================================
+     DEMO TOUR
+     ============================================================ */
+  const tourSteps = [
+    { screen: 'welcome', message: '1/8 · Workspace discovery — email-first routing to correct SSO' },
+    { screen: 'login', message: '2/8 · Login — Google Workspace SSO เด่น + master password fallback' },
+    { screen: 'google', message: '3/8 · Google OAuth — restricted to @iux24.com via hd parameter' },
+    { screen: 'twofa', message: '4/8 · 2FA — TOTP/Passkey, enforced by org policy' },
+    { screen: 'dashboard', message: '5/8 · Dashboard — Notion database view: tags, filters, properties' },
+    { screen: 'detail', message: '6/8 · Item page — Notion-style properties + toggle blocks (Credentials, Access, Activity)' },
+    { screen: 'sso', message: '7/8 · SSO Settings — providers, domains, group mapping, security policy' },
+    { screen: 'audit', message: '8/8 · Audit log — Notion database with status tags' },
+  ];
+  let tourIdx = 0;
+  let tourRunning = false;
+  function startTour() {
+    if (tourRunning) return;
+    tourRunning = true; tourIdx = 0; nextTour();
+  }
+  function nextTour() {
+    if (tourIdx >= tourSteps.length) {
+      toast('success', '🎉 Tour complete', 'ลอง click รอบ ๆ ดูได้!', 5000);
+      tourRunning = false;
+      return;
+    }
+    const step = tourSteps[tourIdx];
+    showScreen(step.screen);
+    toast('info', '🎬 Demo Tour', step.message, 3000);
+    tourIdx++;
+    setTimeout(nextTour, 3500);
+  }
+
+  /* ============================================================
+     INIT
+     ============================================================ */
+  toast('info', '👋 Welcome', 'Notion-style prototype · กดปุ่ม "Demo Tour" ที่มุมบนเพื่อเริ่ม', 6000);
+</script>
+
+</body>
+</html>

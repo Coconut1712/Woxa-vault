@@ -1,0 +1,31 @@
+# ============================================================================
+# Local development infrastructure for Woxa Vault API.
+# Postgres exposed on port 5433 (host) to avoid colliding with any system
+# Postgres running on 5432.
+# ============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: woxa-vault-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: woxa
+      POSTGRES_PASSWORD: woxa_local_dev
+      POSTGRES_DB: woxa_vault
+      # Required for gen_random_uuid() / pgcrypto extension in initdb
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-extensions.sql:/docker-entrypoint-initdb.d/00-extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U woxa -d woxa_vault"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+    name: woxa-vault-postgres-data

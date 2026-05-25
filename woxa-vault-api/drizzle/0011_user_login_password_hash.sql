@@ -1,0 +1,34 @@
+-- Migration 0011: two-password model — users.login_password_hash.
+--
+-- Why:
+--   Previously `users.password_hash` was BOTH the master password AND the
+--   credential `POST /auth/login` verified — login and master were the same
+--   value. The product requires them to be distinct: the login password is the
+--   email+password sign-in credential, and the master password is reserved for
+--   the vault-unlock gate + recovery kit. This column carries the Argon2id hash
+--   of the LOGIN password so the two can diverge.
+--
+-- Semantics:
+--   * NULL = the user has no login password (SSO-only / legacy accounts that
+--     pre-date this split). Those users must sign in with Google; email+password
+--     login fails for them (the login handler still runs a dummy Argon2 verify
+--     so timing does not leak the NULL state — no user-enumeration oracle).
+--   * Set at `POST /auth/register` (email+password self-service signup).
+--   * `password_hash` (master) is now master-only and is NEVER consulted by the
+--     login handler; it remains the subject of `/me/verify-password`,
+--     `requireVaultUnlocked`, and the recovery-kit flow.
+--
+-- Threat model:
+--   Asset: the email+password login credential. Adversary: a brute-forcer or an
+--   attacker who learned the master password (e.g. via a phished recovery kit)
+--   and tries to use it to log in. Mitigation: login verifies ONLY
+--   login_password_hash, so master-password knowledge alone cannot mint a
+--   session. Residual risk: a user who reuses the same string for both factors
+--   collapses the separation — accepted; not enforceable server-side without
+--   storing a comparable representation (which we will not do).
+--
+-- No backfill: existing rows keep login_password_hash NULL by design — they
+-- continue to authenticate via SSO, and may opt into email+password later when
+-- a "set login password" affordance ships.
+
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "login_password_hash" text;

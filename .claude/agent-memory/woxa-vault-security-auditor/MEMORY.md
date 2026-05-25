@@ -1,0 +1,16 @@
+- [Project Phase](project_phase.md) — Phase A — backend KEK, lock is UX-only gate
+- [Crypto Primitive Locations](crypto_primitives.md) — where Argon2 / DEK / KMS helpers live
+- [Validation & Rate Limit Conventions](validation_and_ratelimit.md) — Zod + jsonValidator pattern + two-tier rate limit
+- [Audit Logger & Pino Redact](audit_and_logging.md) — pino redact list, audit_events insert pattern
+- [Auth & Session Patterns](auth_session_patterns.md) — Lucia v3 sessions, requireAuth middleware, fail-closed AuthProvider
+- [Vault Lock Architecture](vault_lock_architecture.md) — Phase A lock state machine, sessionStorage timestamp design
+- [Accepted Phase A Residuals](phase_a_residuals.md) — known deferred risks the team has consciously chosen
+- [Recurring Anti-patterns To Grep](recurring_antipatterns.md) — patterns the team tends to introduce; first checks in new audits
+- [MFA Patterns](mfa_patterns.md) — TOTP/backup-code architecture, mfaToken format, rate-limit gaps to recheck
+- [SSO 2FA Handoff](sso_2fa_handoff.md) — Google SSO app-level 2FA gate + mfa_pending cookie handoff (audited, shippable)
+- [Mailer Patterns](mailer_patterns.md) — Resend module HTML escape rules, dev fallback gating, redact list cross-check
+- [RBAC Org Hierarchy](rbac_org_hierarchy.md) — single-owner model, outranks(), transfer invariant (2-layer), gaps to recheck
+- [Require-2FA Policy Enforcement](require_2fa_enforcement.md) — workspace require2fa policy, server-side gate map, multi-org asymmetry
+- [Two-Password Model](two_password_model.md) — login vs master field map, register invariants, vault_unlock auto-stamp residual
+- [Active Workspace Switching](active_workspace_switching.md) — M-1 multi-org: resolveActiveOrg seam, per-session pointer, call-site inventory, no role-bleed (SHIPPABLE)
+- [Workspace Security Settings + SSO](workspace_security_settings.md) — orgPolicy shape, ReDoS-safe DOMAIN_RE, requireSso phantom-control HIGH, cross-tenant SSO-allowlist DoS
