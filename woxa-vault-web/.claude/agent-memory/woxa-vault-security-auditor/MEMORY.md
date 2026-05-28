@@ -1,0 +1,2 @@
+- [Notifications feature](project_notifications_feature.md) — architecture + audit notes for the event-driven notification inbox; recipient computed server-side, send.viewed atomicity nuance
+- [Slug never-trusted](project_slug_never_trusted.md) — organizations.slug is attacker-influenceable; never key authz/SSO/routing on it; now auto-follows name on rename

@@ -1,0 +1,391 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  /* Brand accent */
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-muted: var(--brand-muted);
+
+  /* Theme-aware surfaces & lines (auto adapt to light/dark) */
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line-1: var(--line-1);
+  --color-line-2: var(--line-2);
+  --color-line-3: var(--line-3);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+}
+
+/* =====================================================================
+   LIGHT THEME (default)
+   Clean modern light — high contrast, soft surfaces
+   ===================================================================== */
+:root {
+  /* Base layers — slight off-white base so white cards pop */
+  --background: #f7f7fa;
+  --foreground: #0f0f12;
+
+  --card: #ffffff;
+  --card-foreground: #0f0f12;
+
+  --popover: #ffffff;
+  --popover-foreground: #0f0f12;
+
+  --primary: #0f0f12;
+  --primary-foreground: #ffffff;
+
+  --secondary: #eeeef2;
+  --secondary-foreground: #0f0f12;
+
+  --muted: #f0f0f3;
+  --muted-foreground: #62626a;
+
+  --accent: #ececef;
+  --accent-foreground: #0f0f12;
+
+  --destructive: #e11d48;
+
+  --border: #d8d8de;
+  --input: #d8d8de;
+  --ring: #6366f1;
+
+  --radius: 10px;
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #0f0f12;
+  --sidebar-primary: #6366f1;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(15, 15, 18, 0.05);
+  --sidebar-accent-foreground: #0f0f12;
+  --sidebar-border: #e2e2e7;
+  --sidebar-ring: #6366f1;
+
+  /* Brand — Electric violet */
+  --brand: #6d5cf2;
+  --brand-foreground: #ffffff;
+  --brand-muted: rgba(109, 92, 242, 0.10);
+
+  /* Surface tokens for theme-aware overlays
+     (replaces hardcoded rgba(255, 255, 255, X) patterns) */
+  --surface-1: rgba(15, 15, 18, 0.03);
+  --surface-2: rgba(15, 15, 18, 0.05);
+  --surface-3: rgba(15, 15, 18, 0.08);
+  --line-1: rgba(15, 15, 18, 0.06);
+  --line-2: rgba(15, 15, 18, 0.10);
+  --line-3: rgba(15, 15, 18, 0.16);
+}
+
+/* =====================================================================
+   DARK THEME — Linear / Vercel / Raycast inspired
+   ===================================================================== */
+.dark {
+  --background: #0a0a0b;
+  --foreground: #ededee;
+
+  --card: #121214;
+  --card-foreground: #ededee;
+
+  --popover: #18181b;
+  --popover-foreground: #ededee;
+
+  --primary: #ededee;
+  --primary-foreground: #0a0a0b;
+
+  --secondary: #1a1a1d;
+  --secondary-foreground: #ededee;
+
+  --muted: #18181b;
+  --muted-foreground: #8a8a93;
+
+  --accent: #1f1f23;
+  --accent-foreground: #ededee;
+
+  --destructive: #f43f5e;
+
+  --border: #1f1f23;
+  --input: #1f1f23;
+  --ring: #6366f1;
+
+  --sidebar: #08080a;
+  --sidebar-foreground: #ededee;
+  --sidebar-primary: #6366f1;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(255, 255, 255, 0.04);
+  --sidebar-accent-foreground: #ededee;
+  --sidebar-border: #18181b;
+  --sidebar-ring: #6366f1;
+
+  --brand: #7c66ff;
+  --brand-foreground: #ffffff;
+  --brand-muted: rgba(124, 102, 255, 0.12);
+
+  /* Same surface tokens — but inverted to white overlay on dark */
+  --surface-1: rgba(255, 255, 255, 0.02);
+  --surface-2: rgba(255, 255, 255, 0.04);
+  --surface-3: rgba(255, 255, 255, 0.06);
+  --line-1: rgba(255, 255, 255, 0.06);
+  --line-2: rgba(255, 255, 255, 0.10);
+  --line-3: rgba(255, 255, 255, 0.16);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body {
+    background: var(--background);
+    color: var(--foreground);
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, "Inter",
+      "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "cv11", "ss01", "ss03";
+    letter-spacing: -0.005em;
+    background-attachment: fixed;
+  }
+
+  /* Subtle ambient gradient — softer in light, more visible in dark */
+  body {
+    background-image:
+      radial-gradient(
+        circle 1200px at 0% -10%,
+        rgba(99, 102, 241, 0.04) 0%,
+        transparent 50%
+      ),
+      radial-gradient(
+        circle 800px at 100% 110%,
+        rgba(244, 63, 94, 0.02) 0%,
+        transparent 50%
+      );
+  }
+  .dark body {
+    background-image:
+      radial-gradient(
+        circle 1200px at 0% -10%,
+        rgba(99, 102, 241, 0.07) 0%,
+        transparent 50%
+      ),
+      radial-gradient(
+        circle 800px at 100% 110%,
+        rgba(244, 63, 94, 0.04) 0%,
+        transparent 50%
+      );
+  }
+
+  html {
+    @apply font-sans;
+  }
+
+  /* Refined headings */
+  h1,
+  h2,
+  h3,
+  h4 {
+    letter-spacing: -0.02em;
+  }
+
+  /* Tabular numbers */
+  .tabular-nums,
+  table {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Sleek scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(15, 15, 18, 0.08);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(15, 15, 18, 0.16);
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .dark ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.16);
+  }
+
+  ::selection {
+    background: rgba(109, 92, 242, 0.24);
+    color: var(--foreground);
+  }
+  .dark ::selection {
+    background: rgba(124, 102, 255, 0.32);
+    color: white;
+  }
+}
+
+@layer utilities {
+  /* Hide scrollbar but keep scrolling functional */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Monospace for secrets */
+  .font-mono-secret {
+    font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, "SF Mono",
+      Menlo, Consolas, monospace;
+    font-variant-ligatures: none;
+    letter-spacing: 0.02em;
+  }
+
+  /* Glassmorphism */
+  .glass {
+    background: color-mix(in srgb, var(--card) 70%, transparent);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+  }
+
+  .glass-strong {
+    background: color-mix(in srgb, var(--background) 78%, transparent);
+    backdrop-filter: blur(24px) saturate(200%);
+    -webkit-backdrop-filter: blur(24px) saturate(200%);
+  }
+
+  /* Subtle elevated card */
+  .card-elevated {
+    background: var(--card);
+  }
+  .dark .card-elevated {
+    background: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.02) 0%,
+      rgba(255, 255, 255, 0) 100%
+    );
+  }
+
+  /* Brand gradient text */
+  .text-gradient {
+    background: linear-gradient(135deg, #0f0f12 0%, #4a4a52 100%);
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+  }
+  .dark .text-gradient {
+    background: linear-gradient(135deg, #ffffff 0%, #b4b4be 100%);
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+  }
+
+  .text-gradient-brand {
+    background: linear-gradient(135deg, #6d5cf2 0%, #a855f7 100%);
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+  }
+
+  /* Soft glow shadows for accent elements */
+  .shadow-brand {
+    box-shadow:
+      0 0 0 1px rgba(109, 92, 242, 0.32),
+      0 8px 28px rgba(109, 92, 242, 0.22);
+  }
+  .dark .shadow-brand {
+    box-shadow:
+      0 0 0 1px rgba(124, 102, 255, 0.4),
+      0 8px 32px rgba(124, 102, 255, 0.32);
+  }
+
+  .shadow-card {
+    box-shadow:
+      0 1px 2px rgba(15, 15, 18, 0.04),
+      0 1px 1px rgba(15, 15, 18, 0.03);
+  }
+  .dark .shadow-card {
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.04),
+      0 1px 2px rgba(0, 0, 0, 0.4);
+  }
+
+  /* Grid pattern overlay */
+  .bg-grid {
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  /* Dot grid */
+  .bg-dots {
+    background-image: radial-gradient(
+      rgba(255, 255, 255, 0.06) 1px,
+      transparent 1px
+    );
+    background-size: 24px 24px;
+  }
+}
+
+/* Animation: subtle pulse for live indicators */
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}

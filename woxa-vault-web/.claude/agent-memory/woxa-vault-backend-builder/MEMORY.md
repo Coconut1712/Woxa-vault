@@ -1,0 +1,9 @@
+- [Shared helpers](shared-helpers.md) — common helpers (getClientIp, currentOrgForUser, hashIp) live in `src/lib/`, not in route files
+- [Anti-enumeration 404 pattern](anti-enumeration-404.md) — return 404, not 403, for resources outside the caller's tenant
+- [Atomic burn pattern for sends](atomic-burn-pattern.md) — single SQL UPDATE with guard predicates handles view-count race safely
+- [Test seed](test-seed.md) — `dev@iux24.com` / `WoxaVault!Dev2026` in org `woxa` with role `owner`
+- [Migration batch is atomic](migration-batch-atomic.md) — one failing migration rolls back ALL pending ones in a db:migrate run; fix data blocker then re-run
+- [Dev DB access](dev-db-access.md) — reach dev Postgres via `docker exec woxa-vault-postgres psql`; no host psql; heredoc stdin no-ops, use -c; table is `organizations` not `orgs`
+- [SSO 2FA handoff contract](sso-2fa-handoff-contract.md) — SSO gates TOTP via HttpOnly `mfa_pending` cookie + /login/mfa redirect; verify-login reads token body-first then cookie
+- [View/Reveal split](view-reveal-split.md) — GET /items/:id is VIEW-only (password null, audit item.view); reveal moved to GET /items/:id/password (audit item.reveal); share audit metadata now carries grantee/revoked email
+- [Workspace Settings Phase 1](workspace-settings-phase1.md) — PATCH/DELETE /workspace, expanded org policy (autoLockMinutes+sso) in jsonb (no migration), SSO domain/JIT enforcement LIVE keyed by email-domain across orgs; requireSso + server autoLock deferred
