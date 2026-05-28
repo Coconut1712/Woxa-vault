@@ -173,6 +173,20 @@ export const sendRoutes = new Hono<{ Variables: AuthVariables }>()
       }),
     }));
 
+    const current = await activeOrgForContext(c);
+    await db.insert(auditEvents).values({
+      orgId: current?.orgId ?? null,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "send.list_viewed",
+      targetType: "user",
+      targetId: user.id,
+      ipHash: hashIp(getClientIp(c)),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+      metadata: { count: sends.length },
+    });
+
     return c.json({ sends });
   })
 

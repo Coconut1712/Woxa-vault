@@ -20,6 +20,14 @@ const bytea = customType<{ data: Buffer; default: false }>({
   dataType() {
     return "bytea";
   },
+  toDriver(value: Buffer) {
+    return value;
+  },
+  fromDriver(value: unknown) {
+    if (Buffer.isBuffer(value)) return value;
+    if (value instanceof Uint8Array) return Buffer.from(value);
+    return Buffer.alloc(0);
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -67,10 +75,13 @@ export const users = pgTable(
     // "force re-login after X" checks. NULL = master never set (SSO-only users).
     passwordUpdatedAt: timestamp("password_updated_at", { withTimezone: true }),
 
-    // Phase C+: zero-knowledge auth — Argon2id hash of master auth key derived
-    // client-side from the master password. Master password itself is never
-    // transmitted to the server in Phase C.
+    // Phase C+: zero-knowledge auth — Argon2id hash of LOGIN auth key derived
+    // client-side from the LOGIN password.
     authKeyHash: text("auth_key_hash"),
+
+    // Phase C+: zero-knowledge unlock — Argon2id hash of MASTER auth key derived
+    // client-side from the MASTER password. Used for vault-unlock gate.
+    masterAuthKeyHash: text("master_auth_key_hash"),
 
     // Recovery kit (DESIGN.md §6 — Phase A scaffolding for the zero-knowledge
     // recovery flow). The server stores ONLY an Argon2id hash of the recovery
@@ -100,6 +111,12 @@ export const users = pgTable(
     // Google OAuth `sub` claim — stable identifier even if the user's email
     // changes inside Google Workspace. Set on first successful SSO login.
     ssoSubject: text("sso_subject"),
+
+    // Notification preferences (DESIGN.md §7.1). Stores a JSON object of
+    // toggles (e.g. { "newLogin": true, "vaultShared": true }).
+    // Defaults to all-on ({}) server-side; logic in lib/notifications.ts
+    // interprets missing keys as true (opt-out model).
+    notificationPreferences: jsonb("notification_preferences").notNull().default(sql`'{}'::jsonb`),
 
     // Account state
     status: text("status").notNull().default("active"),
@@ -234,6 +251,45 @@ export const auditEvents = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Teams (DESIGN.md §7.2). Group of users within an organization.
+// ---------------------------------------------------------------------------
+
+export const teams = pgTable(
+  "teams",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    orgNameIdx: uniqueIndex("teams_org_name_idx").on(t.orgId, t.name),
+  }),
+);
+
+export const teamMembers = pgTable(
+  "team_members",
+  {
+    teamId: uuid("team_id")
+      .notNull()
+      .references(() => teams.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // lead | member
+    role: text("role").notNull().default("member"),
+    addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.teamId, t.userId] }),
+    userIdx: index("team_members_user_idx").on(t.userId),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Vaults (DESIGN.md §7.2). Phase A subset — name/description/icon/color +
 // owning org + created_by. RLS / wrapped vault keys arrive in Phase C.
 // ---------------------------------------------------------------------------
@@ -272,11 +328,39 @@ export const vaultMembers = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     // manager / editor / user / viewer per API_CONTRACT.md.
     role: text("role").notNull().default("editor"),
+    // Role to revert to when temporary access expires (null = remove member).
+    originalRole: text("original_role"),
+    // When this temporary role expires.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.vaultId, t.userId] }),
     userIdx: index("vault_members_user_idx").on(t.userId),
+  }),
+);
+
+// Team-level vault grants.
+export const vaultTeamMembers = pgTable(
+  "vault_team_members",
+  {
+    vaultId: uuid("vault_id")
+      .notNull()
+      .references(() => vaults.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id")
+      .notNull()
+      .references(() => teams.id, { onDelete: "cascade" }),
+    // manager / editor / user / viewer
+    role: text("role").notNull().default("editor"),
+    // Role to revert to when temporary access expires.
+    originalRole: text("original_role"),
+    // When this temporary role expires.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.vaultId, t.teamId] }),
+    teamIdx: index("vault_team_members_team_idx").on(t.teamId),
   }),
 );
 
@@ -328,8 +412,9 @@ export const items = pgTable(
     notesIv: bytea("notes_iv"),
 
     // Per-item DEK wrapped by the LOCAL_KEK (Phase A) — will move to KMS in B.
-    dekCiphertext: bytea("dek_ciphertext").notNull(),
-    dekIv: bytea("dek_iv").notNull(),
+    // NULL in Zero-Knowledge mode (encryptionVersion >= 2).
+    dekCiphertext: bytea("dek_ciphertext"),
+    dekIv: bytea("dek_iv"),
 
     // Optional folder assignment. SET NULL on folder delete (DESIGN.md §7.3).
     folderId: uuid("folder_id").references(() => folders.id, { onDelete: "set null" }),
@@ -367,11 +452,36 @@ export const folderMembers = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     // manager / editor / user / viewer — same role vocabulary as vault_members.
     role: text("role").notNull().default("viewer"),
+    // Role to revert to when temporary access expires.
+    originalRole: text("original_role"),
+    // When this temporary role expires.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.folderId, t.userId] }),
     userIdx: index("folder_members_user_idx").on(t.userId),
+  }),
+);
+
+// Team-level folder grants.
+export const folderTeamMembers = pgTable(
+  "folder_team_members",
+  {
+    folderId: uuid("folder_id")
+      .notNull()
+      .references(() => folders.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id")
+      .notNull()
+      .references(() => teams.id, { onDelete: "cascade" }),
+    role: text("role").notNull().default("viewer"),
+    originalRole: text("original_role"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.folderId, t.teamId] }),
+    teamIdx: index("folder_team_members_team_idx").on(t.teamId),
   }),
 );
 
@@ -389,11 +499,36 @@ export const itemMembers = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     role: text("role").notNull().default("viewer"),
+    // Role to revert to when temporary access expires.
+    originalRole: text("original_role"),
+    // When this temporary role expires.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.itemId, t.userId] }),
     userIdx: index("item_members_user_idx").on(t.userId),
+  }),
+);
+
+// Team-level item grants.
+export const itemTeamMembers = pgTable(
+  "item_team_members",
+  {
+    itemId: uuid("item_id")
+      .notNull()
+      .references(() => items.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id")
+      .notNull()
+      .references(() => teams.id, { onDelete: "cascade" }),
+    role: text("role").notNull().default("viewer"),
+    originalRole: text("original_role"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.itemId, t.teamId] }),
+    teamIdx: index("item_team_members_team_idx").on(t.teamId),
   }),
 );
 
@@ -499,6 +634,99 @@ export const userMfaBackupCodes = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Import Jobs (DESIGN.md §15.2). Track background migration tasks.
+export const importJobs = pgTable(
+  "import_jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    source: text("source").notNull(), // 1password, bitwarden, lastpass, generic_csv
+    status: text("status").notNull().default("pending"), // pending, processing, completed, failed
+    config: jsonb("config").notNull().default(sql`'{}'::jsonb`), // targetVaultId, targetFolderId, conflictPolicy
+    stats: jsonb("stats").notNull().default(sql`'{"total":0,"created":0,"skipped":0,"failed":0}'::jsonb`),
+    errorLog: jsonb("error_log").notNull().default(sql`'[]'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    orgIdx: index("import_jobs_org_idx").on(t.orgId),
+    userIdx: index("import_jobs_user_idx").on(t.userId),
+  }),
+);
+
+// Import Items. Stores parsed items before they are committed to the vault.
+export const importItems = pgTable(
+  "import_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => importJobs.id, { onDelete: "cascade" }),
+    // The parsed item data in a format ready for createItem (type, name, etc.).
+    data: jsonb("data").notNull(),
+    status: text("status").notNull().default("pending"), // pending, imported, skipped, failed
+    error: text("error"),
+  },
+  (t) => ({
+    jobIdx: index("import_items_job_idx").on(t.jobId),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Zero-Knowledge Encryption (Phase C, DESIGN.md §6).
+// ---------------------------------------------------------------------------
+
+// User Keys: stores the client-side generated public key and the master-password-wrapped private key.
+export const userKeys = pgTable(
+  "user_keys",
+  {
+    userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+    publicKey: bytea("public_key").notNull(),         // X25519 public
+    encryptedPrivateKey: bytea("encrypted_private_key").notNull(), // encrypted with stretched master key
+    privateKeyIv: bytea("private_key_iv").notNull(),
+    privateKeyAuthTag: bytea("private_key_auth_tag").notNull(),
+    kdfAlgorithm: text("kdf_algorithm").notNull().default("argon2id"),
+    kdfParams: jsonb("kdf_params").notNull().default(sql`'{}'::jsonb`),
+    keyVersion: integer("key_version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  }
+);
+
+// Vault Keys: stores the vault-wide DEK wrapped with each member's user public key.
+export const vaultKeys = pgTable(
+  "vault_keys",
+  {
+    vaultId: uuid("vault_id").notNull().references(() => vaults.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    wrappedKey: bytea("wrapped_key").notNull(), // vault key encrypted with user pubkey
+    wrapAlgo: text("wrap_algo").notNull().default("x25519-aes256gcm"),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.vaultId, t.userId] }),
+  })
+);
+
+// Item Versions: stores encrypted item history.
+export const itemVersions = pgTable(
+  "item_versions",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    itemId: uuid("item_id").notNull().references(() => items.id, { onDelete: "cascade" }),
+    versionNumber: integer("version_number").notNull(),
+    encryptedData: bytea("encrypted_data").notNull(),
+    iv: bytea("iv").notNull(),
+    authTag: bytea("auth_tag").notNull(),
+    modifiedBy: uuid("modified_by").references(() => users.id, { onDelete: "set null" }),
+    modifiedAt: timestamp("modified_at", { withTimezone: true }).notNull().defaultNow(),
+    changeSummary: text("change_summary"),
+  },
+  (t) => ({
+    itemVersionIdx: uniqueIndex("item_versions_item_num_idx").on(t.itemId, t.versionNumber),
+  })
+);
+
 // Invitations (DESIGN.md §7.1). A pending org membership where the user may
 // not yet exist. Accepting an invite materializes (or links) a `users` row
 // and an `org_members` row, then sets `accepted_at` here.
@@ -587,19 +815,75 @@ export const notifications = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Access Requests (DESIGN.md §19). Viewer users can request permission to
+// access secrets. Approvers (Managers) can approve or deny these requests.
+// ---------------------------------------------------------------------------
+export const accessRequests = pgTable(
+  "access_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    requesterId: uuid("requester_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // What the request is for (item | folder | vault) + its id + its human name.
+    targetType: text("target_type").notNull(),
+    targetId: uuid("target_id").notNull(),
+    targetName: text("target_name"),
+    // Requested role: user | editor | manager.
+    requestedRole: text("requested_role").notNull(),
+    // NULL = permanent access. Total minutes (Days*1440 + Hours*60 + Minutes).
+    durationMinutes: integer("duration_minutes"),
+    reason: text("reason").notNull(),
+    // pending | approved | denied | expired | cancelled.
+    status: text("status").notNull().default("pending"),
+
+    // Approval details.
+    approverId: uuid("approver_id").references(() => users.id, { onDelete: "set null" }),
+    approvedRole: text("approved_role"),
+    approvedDurationMinutes: integer("approved_duration_minutes"),
+    decisionReason: text("decision_reason"),
+
+    // Timestamps.
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    // When the approved access should expire.
+    accessExpiresAt: timestamp("access_expires_at", { withTimezone: true }),
+  },
+  (t) => ({
+    orgIdx: index("access_requests_org_idx").on(t.orgId),
+    requesterIdx: index("access_requests_requester_idx").on(t.requesterId),
+    targetIdx: index("access_requests_target_idx").on(t.targetType, t.targetId),
+    statusIdx: index("access_requests_status_idx").on(t.status),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Type exports for use across the app.
 // ---------------------------------------------------------------------------
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Session = typeof sessions.$inferSelect;
 export type Organization = typeof organizations.$inferSelect;
+export type Team = typeof teams.$inferSelect;
+export type NewTeam = typeof teams.$inferInsert;
+export type TeamMember = typeof teamMembers.$inferSelect;
+export type NewTeamMember = typeof teamMembers.$inferInsert;
 export type Vault = typeof vaults.$inferSelect;
 export type NewVault = typeof vaults.$inferInsert;
 export type VaultMember = typeof vaultMembers.$inferSelect;
+export type VaultTeamMember = typeof vaultTeamMembers.$inferSelect;
+export type NewVaultTeamMember = typeof vaultTeamMembers.$inferInsert;
 export type FolderMember = typeof folderMembers.$inferSelect;
 export type NewFolderMember = typeof folderMembers.$inferInsert;
+export type FolderTeamMember = typeof folderTeamMembers.$inferSelect;
+export type NewFolderTeamMember = typeof folderTeamMembers.$inferInsert;
 export type ItemMember = typeof itemMembers.$inferSelect;
 export type NewItemMember = typeof itemMembers.$inferInsert;
+export type ItemTeamMember = typeof itemTeamMembers.$inferSelect;
+export type NewItemTeamMember = typeof itemTeamMembers.$inferInsert;
 export type Item = typeof items.$inferSelect;
 export type NewItem = typeof items.$inferInsert;
 export type Folder = typeof folders.$inferSelect;
@@ -615,3 +899,17 @@ export type UserMfaBackupCode = typeof userMfaBackupCodes.$inferSelect;
 export type NewUserMfaBackupCode = typeof userMfaBackupCodes.$inferInsert;
 export type Notification = typeof notifications.$inferSelect;
 export type NewNotification = typeof notifications.$inferInsert;
+export type AccessRequest = typeof accessRequests.$inferSelect;
+export type NewAccessRequest = typeof accessRequests.$inferInsert;
+
+export type ImportJob = typeof importJobs.$inferSelect;
+export type NewImportJob = typeof importJobs.$inferInsert;
+export type ImportItem = typeof importItems.$inferSelect;
+export type NewImportItem = typeof importItems.$inferInsert;
+
+export type UserKey = typeof userKeys.$inferSelect;
+export type NewUserKey = typeof userKeys.$inferInsert;
+export type VaultKey = typeof vaultKeys.$inferSelect;
+export type NewVaultKey = typeof vaultKeys.$inferInsert;
+export type ItemVersion = typeof itemVersions.$inferSelect;
+export type NewItemVersion = typeof itemVersions.$inferInsert;

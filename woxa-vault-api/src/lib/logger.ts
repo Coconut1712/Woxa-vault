@@ -45,6 +45,12 @@ const REDACT_PATHS = [
   '*.qrDataUrl',
   '*.acceptUrl',
   '*.accept_url',
+  // ZK fields — credential hashes and wrapped private keys.
+  '*.authKeyHash',
+  '*.auth_key_hash',
+  '*.encryptedPrivateKey',
+  '*.privateKeyIv',
+  '*.privateKeyAuthTag',
 ];
 
 export const logger = pino({

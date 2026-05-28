@@ -2,10 +2,13 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "@/db/client";
-import { auditEvents, sessions, users } from "@/db/schema";
+import { auditEvents, sessions, userKeys, users } from "@/db/schema";
 import { jsonValidator } from "@/lib/validator";
 import { hashPassword, verifyPassword } from "@/lib/password";
 import { signMfaToken } from "@/lib/mfa";
+
+const VERIFY_DUMMY_HASH =
+  "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 import {
   SESSION_COOKIE_NAME,
   buildClearSessionCookie,
@@ -26,7 +29,8 @@ import { getCookie } from "hono/cookie";
 
 const loginSchema = z.object({
   email: z.string().email().max(254).transform((v) => v.trim().toLowerCase()),
-  password: z.string().min(1).max(1024),
+  password: z.string().min(1).max(1024).optional(),
+  authKeyHash: z.string().min(64).max(256).optional(),
 });
 
 // Self-service signup. `password` here is the LOGIN password (NOT the master
@@ -55,8 +59,33 @@ const LOCK_THRESHOLD = 5;
 const LOCK_DURATION_MS = 15 * 60 * 1000;
 
 export const authRoutes = new Hono<{ Variables: AuthVariables }>()
+  .get("/login-info", async (c) => {
+    const email = c.req.query("email")?.trim().toLowerCase();
+    if (!email) throw errors.invalidCredentials();
+
+    const user = await db.query.users.findFirst({
+      where: sql`lower(${users.email}) = ${email}`,
+    });
+
+    if (!user) {
+      // Return dummy data to prevent email enumeration
+      return c.json({
+        userId: "00000000-0000-0000-0000-000000000000",
+        kdf: "argon2id",
+        kdfParams: { iterations: 3, memorySize: 65536, parallelism: 4 },
+      });
+    }
+
+    return c.json({
+      userId: user.id,
+      kdf: "argon2id",
+      kdfParams: { iterations: 3, memorySize: 65536, parallelism: 4 },
+      requiresZk: user.authKeyHash !== null,
+    });
+  })
+
   .post("/login", jsonValidator(loginSchema), async (c) => {
-    const { email, password } = c.req.valid("json");
+    const { email, password, authKeyHash } = c.req.valid("json");
 
     // ConnectingIP heuristic — uses cf-connecting-ip / fly-client-ip first,
     // honoring `X-Forwarded-For` only when `TRUST_PROXY=true`. See clientIp.ts.
@@ -82,21 +111,14 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
       where: sql`lower(${users.email}) = ${email}`,
     });
 
-    // Two-password model: `/auth/login` verifies the LOGIN password
-    // (`login_password_hash`), NOT the master password (`password_hash`). A
-    // user with no login password (SSO-only / legacy account) cannot sign in
-    // here and must use Google — we treat that case identically to an unknown
-    // email so the response does not leak which accounts have a login password.
-    //
     // Constant-ish-time response: always run a dummy verify if the row is
-    // missing OR has no login password hash.
-    if (!user || !user.loginPasswordHash) {
+    // missing OR has no valid hash for the supplied factor.
+    const factorProvided = authKeyHash ? "zk" : "password";
+    const storedHash = factorProvided === "zk" ? user?.authKeyHash : user?.loginPasswordHash;
+
+    if (!user || !storedHash) {
       // Verify against a known-invalid hash so timing leaks email existence less.
-      // (Not perfect; argon2 timing varies, but better than instant 401.)
-      await verifyPassword(
-        "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        password,
-      ).catch(() => false);
+      await verifyPassword(VERIFY_DUMMY_HASH, authKeyHash ?? password ?? "").catch(() => false);
 
       await db.insert(auditEvents).values({
         action: "auth.login.failed",
@@ -105,9 +127,10 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
         ipHash,
         userAgent: c.req.header("user-agent") ?? null,
         success: false,
-        // Distinguish "no such user" from "user exists but SSO-only" in the
-        // audit log (never in the response). Both return invalid_credentials.
-        metadata: { reason: !user ? "user_not_found" : "no_login_password" },
+        metadata: { 
+          factor: factorProvided,
+          reason: !user ? "user_not_found" : "factor_not_available" 
+        },
       });
       throw errors.invalidCredentials();
     }
@@ -122,8 +145,8 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
       );
     }
 
-    // Verify the LOGIN password, never the master password.
-    const ok = await verifyPassword(user.loginPasswordHash, password);
+    // Verify the supplied factor.
+    const ok = await verifyPassword(storedHash, authKeyHash ?? password ?? "");
     if (!ok) {
       const failed = user.failedLoginCount + 1;
       const shouldLock = failed >= LOCK_THRESHOLD;
@@ -201,6 +224,10 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
 
     logger.info({ userId: user.id }, "login success");
 
+    const keys = await db.query.userKeys.findFirst({
+      where: eq(userKeys.userId, user.id),
+    });
+
     return c.json({
       status: "ok" as const,
       user: {
@@ -208,6 +235,12 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
         email: user.email,
         displayName: user.displayName ?? user.name ?? user.email,
       },
+      keys: keys ? {
+        publicKey: keys.publicKey.toString("base64"),
+        encryptedPrivateKey: keys.encryptedPrivateKey.toString("base64"),
+        privateKeyIv: keys.privateKeyIv.toString("base64"),
+        privateKeyAuthTag: keys.privateKeyAuthTag.toString("base64"),
+      } : undefined,
     });
   })
 

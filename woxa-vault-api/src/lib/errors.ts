@@ -55,6 +55,7 @@ export const errors = {
   notFound: (msg = "Not found") => new ApiError(404, "not_found", msg),
   rateLimited: (msg = "Too many requests", retryAfterSec?: number) =>
     new ApiError(429, "rate_limited", msg, retryAfterSec ? { retryAfterSec } : undefined),
+  conflict: (msg = "Resource conflict") => new ApiError(409, "conflict", msg),
   internal: (msg = "Internal server error") => new ApiError(500, "internal_error", msg),
 
   // 409 — `POST /auth/register` called with an email that already has an

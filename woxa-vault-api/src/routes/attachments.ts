@@ -6,6 +6,7 @@ import {
   attachments,
   auditEvents,
   items,
+  vaults,
   type Attachment,
   type Item,
   type Vault,
@@ -183,18 +184,27 @@ export const itemAttachmentRoutes = new Hono<{ Variables: AuthVariables }>()
     const user = c.get("user")!;
     const { id } = c.req.valid("param");
 
-    // Resolve parent item → vault membership before exposing the attachment
-    // list. A 404 here covers both "no such item" and "you can't see it".
-    const item = await db.query.items.findFirst({
-      where: and(eq(items.id, id), isNull(items.deletedAt)),
-    });
-    if (!item) throw errors.notFound("Item not found");
+    const [itemWithVault] = await db
+      .select({ 
+        id: items.id,
+        name: items.name,
+        orgId: vaults.orgId,
+        vaultId: items.vaultId,
+        folderId: items.folderId,
+      })
+      .from(items)
+      .innerJoin(vaults, eq(items.vaultId, vaults.id))
+      .where(and(eq(items.id, id), isNull(items.deletedAt)))
+      .limit(1);
+    
+    if (!itemWithVault) throw errors.notFound("Item not found");
+
     // Listing attachment metadata only needs effective access to the item (any
     // level, including viewer — the file BODY is gated separately at download).
     const role = await resolveItemRole(user.id, {
-      id: item.id,
-      vaultId: item.vaultId,
-      folderId: item.folderId,
+      id: itemWithVault.id,
+      vaultId: itemWithVault.vaultId,
+      folderId: itemWithVault.folderId,
     });
     if (!role) throw errors.notFound("Item not found");
 
@@ -203,6 +213,20 @@ export const itemAttachmentRoutes = new Hono<{ Variables: AuthVariables }>()
       .from(attachments)
       .where(and(eq(attachments.itemId, id), isNull(attachments.deletedAt)))
       .orderBy(desc(attachments.createdAt));
+
+    await db.insert(auditEvents).values({
+      orgId: itemWithVault.orgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "item.attachments_viewed",
+      targetType: "item",
+      targetId: id,
+      targetName: itemWithVault.name,
+      ipHash: hashIp(getClientIp(c)),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+      metadata: { attachmentCount: rows.length },
+    });
 
     return c.json({ attachments: rows.map(toDTO) });
   })

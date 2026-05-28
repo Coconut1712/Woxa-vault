@@ -5,7 +5,7 @@ import { z } from "zod";
 import * as QRCode from "qrcode";
 import { env } from "@/config/env";
 import { db } from "@/db/client";
-import { auditEvents, userMfaBackupCodes, users } from "@/db/schema";
+import { auditEvents, userKeys, userMfaBackupCodes, users } from "@/db/schema";
 import { errors } from "@/lib/errors";
 import { hashIp } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
@@ -782,9 +782,30 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         ipHash,
         userAgent,
         success: true,
-        metadata: { mfaUsed: true },
+        metadata: { mfaUsed: true, phase: user.authKeyHash ? "C" : "A" },
       });
     });
+
+    let keysInfo: any = undefined;
+    try {
+      const [keyRow] = await db
+        .select()
+        .from(userKeys)
+        .where(eq(userKeys.userId, user.id))
+        .limit(1);
+      
+      if (keyRow) {
+        keysInfo = {
+          publicKey: keyRow.publicKey ? Buffer.from(keyRow.publicKey).toString("base64") : undefined,
+          encryptedPrivateKey: keyRow.encryptedPrivateKey ? Buffer.from(keyRow.encryptedPrivateKey).toString("base64") : undefined,
+          privateKeyIv: keyRow.privateKeyIv ? Buffer.from(keyRow.privateKeyIv).toString("base64") : undefined,
+          privateKeyAuthTag: keyRow.privateKeyAuthTag ? Buffer.from(keyRow.privateKeyAuthTag).toString("base64") : undefined,
+        };
+      }
+    } catch (err) {
+      logger.error({ err, userId: user.id }, "Failed to fetch user keys during 2FA verify-login");
+      // Fall through, ZK keys are non-critical for the session itself (user can re-unlock)
+    }
 
     return c.json({
       status: "ok",
@@ -793,6 +814,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         email: user.email,
         displayName: user.displayName ?? user.name ?? user.email,
       },
+      keys: keysInfo,
       mfaSatisfied: true,
     });
   });

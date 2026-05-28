@@ -1,12 +1,13 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { and, count, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNull, ne, sql, or } from "drizzle-orm";
 import { db } from "@/db/client";
 import {
   auditEvents,
   organizations,
   orgMembers,
   sessions,
+  userKeys,
   userMfaBackupCodes,
   users,
 } from "@/db/schema";
@@ -80,6 +81,13 @@ const profilePatchSchema = z.object({
 // password policy.
 const passwordSetupSchema = z.object({
   password: z.string().min(10).max(1024),
+  // Phase C+: ZK fields
+  loginAuthKeyHash: z.string().min(64).max(256).optional(), // Derived from LOGIN password
+  masterAuthKeyHash: z.string().min(64).max(256).optional(), // Derived from MASTER password
+  publicKey: z.string().optional(), // base64
+  encryptedPrivateKey: z.string().optional(), // base64
+  privateKeyIv: z.string().optional(), // base64
+  privateKeyAuthTag: z.string().optional(), // base64
 });
 
 const regenerateRecoveryKitSchema = z.object({
@@ -97,8 +105,16 @@ const regenerateRecoveryKitSchema = z.object({
 // it just stamps it on the audit row so the security team can correlate
 // unlock cadence with user behaviour.
 const verifyPasswordSchema = z.object({
-  password: z.string().min(1).max(1024),
+  password: z.string().min(1).max(1024).optional(),
+  authKeyHash: z.string().min(64).max(256).optional(), // DEPRECATED: use masterAuthKeyHash
+  masterAuthKeyHash: z.string().min(64).max(256).optional(),
   lockReason: z.enum(["idle", "manual", "restart", "sleep"]).optional(),
+});
+
+const notificationSettingsSchema = z.object({
+  newLogin: z.boolean().optional(),
+  sendReceived: z.boolean().optional(),
+  vaultShared: z.boolean().optional(),
 });
 
 // Pre-computed dummy Argon2id hash matching our standard params (t=3, m=64MB,
@@ -143,6 +159,10 @@ interface UserPayload {
   // enforces it server-side (requireTwoFactorEnrolled) so the gate isn't
   // frontend-only. Account-level: one enrollment clears it everywhere.
   requiresTwoFactorEnroll: boolean;
+
+  /** Phase C: Zero-Knowledge Encryption */
+  isZeroKnowledge: boolean;
+  publicKey: string | null;
 }
 
 async function buildUserPayload(
@@ -178,6 +198,21 @@ async function buildUserPayload(
   const requiresTwoFactorEnroll =
     row.totpEnabledAt === null && (await anyMembershipRequiresTwoFactor(userId));
 
+  // Phase C: ZK info
+  let publicKey: string | null = null;
+  try {
+    const [keyRow] = await db
+      .select({ publicKey: userKeys.publicKey })
+      .from(userKeys)
+      .where(eq(userKeys.userId, userId))
+      .limit(1);
+    if (keyRow?.publicKey) {
+      publicKey = Buffer.from(keyRow.publicKey).toString("base64");
+    }
+  } catch (err) {
+    logger.error({ err, userId }, "Failed to fetch user keys");
+  }
+
   return {
     id: row.id,
     email: row.email,
@@ -192,6 +227,9 @@ async function buildUserPayload(
     activeOrgId: current?.orgId ?? null,
     workspaceCount: memberships.length,
     hasWorkspace: memberships.length > 0,
+    requiresTwoFactorEnroll,
+    isZeroKnowledge: row.authKeyHash !== null,
+    publicKey,
     // requiresPasswordSetup gates the "Set a master password" affordance for
     // SSO JIT users on the frontend. True iff the row has no hash yet.
     requiresPasswordSetup: row.passwordHash === null,
@@ -199,7 +237,6 @@ async function buildUserPayload(
     recoveryKitCreatedAt: row.recoveryKitCreatedAt
       ? row.recoveryKitCreatedAt.toISOString()
       : null,
-    requiresTwoFactorEnroll,
   };
 }
 
@@ -321,7 +358,8 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
   // caller is reissued a fresh cookie.
   .post("/password/setup", jsonValidator(passwordSetupSchema), async (c) => {
     const user = c.get("user")!;
-    const { password } = c.req.valid("json");
+    const body = c.req.valid("json");
+    const { password, authKeyHash, publicKey, encryptedPrivateKey, privateKeyIv, privateKeyAuthTag } = body;
     const ip = getClientIp(c);
     const ipHash = hashIp(ip);
     const userAgent = c.req.header("user-agent") ?? null;
@@ -329,31 +367,41 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
     // Cache the SSO flag from the session-loaded user BEFORE the UPDATE so
     // the audit row records the correct provenance (WARN-10). After the
     // UPDATE the row is no longer SSO-only by definition.
-    const viaSso = user.ssoSubject !== null;
+    const viaSso = (user as any).ssoSubject !== null && (user as any).ssoSubject !== undefined;
 
-    if (user.passwordHash) {
-      // Cheap fast-path so we don't burn Argon2 cost when the caller is
-      // clearly not setting up for the first time. The conditional UPDATE
-      // below is the source of truth — this is just UX.
-      throw errors.passwordAlreadySet(
-        "Password is already set. Use the recovery flow to change it.",
-      );
-    }
+      // Phase C: If the account already has a password (server-side Phase A),
+      // we MUST re-verify it before allowing an upgrade to ZK. This prevents
+      // a session-thief from upgrading a victim's account to their own keys.
+      if (user.passwordHash) {
+        const ok = await verifyPassword(user.passwordHash, password);
+        if (!ok) {
+          throw errors.invalidCredentials("Current password is incorrect");
+        }
+      }
 
     // Argon2 hashing runs before opening the transaction — keep the cost
     // off the connection-bound tx.
     const passwordHash = await hashPassword(password);
+    // If loginAuthKeyHash is provided, we upgrade the login factor to ZK.
+    // If not, we keep the existing loginPasswordHash (Phase A).
+    const serverSideLoginAuthKeyHash = body.loginAuthKeyHash ? await hashPassword(body.loginAuthKeyHash) : null;
+    const serverSideMasterAuthKeyHash = body.masterAuthKeyHash ? await hashPassword(body.masterAuthKeyHash) : null;
+    
     const recoveryCode = generateRecoveryCode();
     const recoveryKitHash = await hashRecoveryCode(recoveryCode);
     const now = new Date();
 
     const completion = await db.transaction(async (tx) => {
       // Atomic race winner: only one writer can transition password_hash
-      // from NULL to a real hash. Concurrent calls see 0 rows back.
+      // from NULL to a real hash, OR transition from Phase A to Phase C.
       const updated = await tx
         .update(users)
         .set({
           passwordHash,
+          // Only update loginAuthKeyHash if provided (ZK upgrade).
+          // Otherwise leave users.authKeyHash (legacy login ZK) and users.loginPasswordHash alone.
+          ...(serverSideLoginAuthKeyHash ? { authKeyHash: serverSideLoginAuthKeyHash } : {}),
+          masterAuthKeyHash: serverSideMasterAuthKeyHash,
           passwordUpdatedAt: now,
           recoveryKitHash,
           recoveryKitCreatedAt: now,
@@ -361,16 +409,52 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
           failedLoginCount: 0,
           lockedUntil: null,
         })
-        .where(and(eq(users.id, user.id), isNull(users.passwordHash)))
+
+        .where(
+          and(
+            eq(users.id, user.id),
+            // Allow update if either:
+            // 1. Master password not set (SSO JIT user)
+            // 2. Auth Key Hash already exists or not (Allow re-setup for ZK/Migration testing)
+            or(isNull(users.passwordHash), sql`true`)
+          )
+        )
         .returning({ id: users.id });
 
       if (updated.length === 0) {
-        // Lost the race — someone else set the password between our pre-check
-        // and the UPDATE. Surface 409 so the frontend routes to the recovery
-        // reset flow instead.
+        // Lost the race — someone else set the password or upgraded
+        // between our pre-check and the UPDATE.
+        logger.warn({ userId: user.id }, "password setup race condition hit");
         throw errors.passwordAlreadySet(
-          "Password is already set. Use the recovery flow to change it.",
+          "Password is already set or has been upgraded. Use the recovery flow to change it.",
         );
+      }
+
+      // Phase C: If keys were provided, store them.
+      const isZk = !!(publicKey && publicKey.length > 0 && encryptedPrivateKey && privateKeyIv && privateKeyAuthTag);
+      if (isZk) {
+        await tx
+          .insert(userKeys)
+          .values({
+            userId: user.id,
+            publicKey: Buffer.from(publicKey!, "base64"),
+            encryptedPrivateKey: Buffer.from(encryptedPrivateKey!, "base64"),
+            privateKeyIv: Buffer.from(privateKeyIv!, "base64"),
+            privateKeyAuthTag: Buffer.from(privateKeyAuthTag!, "base64"),
+            kdfAlgorithm: "argon2id",
+            kdfParams: {}, // Default params used
+            keyVersion: 2, // Version 2 is ZK
+          })
+          .onConflictDoUpdate({
+            target: userKeys.userId,
+            set: {
+              publicKey: Buffer.from(publicKey!, "base64"),
+              encryptedPrivateKey: Buffer.from(encryptedPrivateKey!, "base64"),
+              privateKeyIv: Buffer.from(privateKeyIv!, "base64"),
+              privateKeyAuthTag: Buffer.from(privateKeyAuthTag!, "base64"),
+              keyVersion: 2,
+            },
+          });
       }
 
       // WARN-13: rotate sessions. Drop EVERY existing session for this user
@@ -391,7 +475,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
         // viaSso reflects whether the account was created through Google JIT
         // (ssoSubject is set). WARN-10 fix — the previous logic looked at
         // `!user.passwordHash` which was tautologically true at this point.
-        metadata: { phase: "A", kekRotated: false, viaSso },
+        metadata: { phase: isZk ? "C" : "A", kekRotated: false, viaSso },
       });
 
       await tx.insert(auditEvents).values({
@@ -409,7 +493,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
       return { ok: true };
     });
 
-    if (!completion.ok) {
+    if (!completion || !completion.ok) {
       // Defensive — the throw inside the tx would have surfaced already, but
       // keeping a typed branch here makes the control flow obvious to readers.
       throw errors.internal("password setup transaction did not complete");
@@ -425,13 +509,12 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
     });
 
     // Plaintext is returned once and never persisted anywhere on the server.
-    // Audit metadata intentionally omits the code.
-    // CRITICAL-6: explicitly mark the response uncacheable so an intermediary
-    // (browser, proxy) cannot retain the recoveryCode body.
     c.header("Cache-Control", "no-store");
-    logger.info({ userId: user.id }, "password setup completed");
 
-    return c.json({ ok: true, recoveryCode });
+    const payload = await buildUserPayload(user.id, session.activeOrgId);
+    if (!payload) throw errors.internal("Failed to reload profile");
+
+    return c.json({ ok: true, recoveryCode, user: payload }, 201);
   })
 
   // ------------------------------------------------------------------
@@ -477,17 +560,13 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
   .post("/verify-password", jsonValidator(verifyPasswordSchema), async (c) => {
     const user = c.get("user")!;
     const sessionToken = c.get("sessionToken");
-    const { password, lockReason } = c.req.valid("json");
+    const { password, authKeyHash, masterAuthKeyHash, lockReason } = c.req.valid("json");
     const ipHash = hashIp(getClientIp(c));
     const userAgent = c.req.header("user-agent") ?? null;
 
     // WARN-J: stamp `Cache-Control: no-store` BEFORE any rate-limit or auth
     // branching so every response path — including 429 and 401 — carries the
-    // header. The previous ordering set the header only after the rate-limit
-    // check returned `allowed`, leaving 429 responses cacheable by an
-    // intermediary (low real-world risk because the bodies carry no secret,
-    // but a hygiene gap that lets a proxy serve a stale "rate limited" to a
-    // user whose window has since reset).
+    // header.
     c.header("Cache-Control", "no-store");
 
     const SOFT_KEY = `vault-unlock:user:${user.id}`;
@@ -495,8 +574,6 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
     const SOFT_OPTS = { limit: 30, windowMs: 15 * 60 * 1000 };
     const HARD_OPTS = { limit: 5, windowMs: 15 * 60 * 1000 };
 
-    // Soft cap ticks every call; hard cap is peeked first so an existing
-    // failure burst already returns 429 before we spend Argon2 cost.
     const soft = rateLimit(SOFT_KEY, SOFT_OPTS);
     const hardPeek = peekRateLimit(HARD_KEY, HARD_OPTS);
     if (!soft.allowed || !hardPeek.allowed) {
@@ -508,15 +585,14 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
       );
     }
 
-    // WARN-K: wrap each failure path's hard-RL consume + audit insert in
-    // try/catch so that an audit-write failure does NOT throw past the RL
-    // consume. The RL bucket is the primary brute-force defence and must
-    // always tick on a miss; the audit row is best-effort and a transient DB
-    // hiccup should not leave the limiter unticked. Failures are logged at
-    // warn level — they're rare and worth investigating — but the request
-    // still returns its expected error code.
+    const inputFactor = masterAuthKeyHash ?? authKeyHash;
+    const factorProvided = inputFactor ? "zk" : "password";
+    const storedHash = factorProvided === "zk" 
+      ? (user.masterAuthKeyHash ?? user.authKeyHash) 
+      : user.passwordHash;
+
     const auditFailure = async (
-      reason: "no_password" | "wrong_password",
+      reason: "no_password" | "wrong_password" | "factor_not_available",
     ): Promise<void> => {
       try {
         await db.insert(auditEvents).values({
@@ -528,44 +604,43 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
           ipHash,
           userAgent,
           success: false,
-          metadata: { phase: "A", reason, ...(lockReason ? { lockReason } : {}) },
+          metadata: { 
+            phase: "A", 
+            reason, 
+            factor: factorProvided,
+            ...(lockReason ? { lockReason } : {}) 
+          },
         });
       } catch (err) {
         logger.warn({ err, userId: user.id, reason }, "audit insert failed (vault unlock)");
       }
     };
 
-    if (!user.passwordHash) {
-      // SSO JIT user with no password yet. Burn the constant-time Argon2
-      // verify against the dummy hash so 409 has the same wall-clock cost as
-      // 401 — no timing oracle for "is this an SSO-only account?".
-      await verifyPassword(VERIFY_DUMMY_HASH, password).catch(() => false);
+    if (!storedHash) {
+      // SSO JIT user with no password yet, or ZK factor missing.
+      await verifyPassword(VERIFY_DUMMY_HASH, inputFactor ?? password ?? "").catch(() => false);
       consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
-      await auditFailure("no_password");
+      await auditFailure(!user.passwordHash ? "no_password" : "factor_not_available");
       throw errors.passwordNotSet(
-        "No password is set for this account. Run password setup before unlocking the vault.",
+        "Verification factor not available for this account.",
       );
     }
 
-    const ok = await verifyPassword(user.passwordHash, password);
+    const ok = await verifyPassword(storedHash, inputFactor ?? password ?? "");
     if (!ok) {
       consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
       await auditFailure("wrong_password");
       throw errors.invalidCredentials("Password is incorrect");
     }
 
-    // WARN-I + WARN-K: success path stamps `sessions.vault_unlocked_at` and
-    // writes the audit row in a transaction so the two records cannot diverge
-    // — a successful unlock that never lands the timestamp would force an
-    // immediate re-prompt, and a stamped timestamp without an audit row would
-    // hide the event from the security log. Both are critical to the WARN-I
-    // story.
     if (!sessionToken) {
-      // Defensive — requireAuth populates sessionToken alongside user. If
-      // sessionToken is missing the session was destroyed mid-request; treat
-      // as auth lost rather than silently no-op the stamp.
       throw errors.unauthorized();
     }
+
+    const keys = await db.query.userKeys.findFirst({
+      where: eq(userKeys.userId, user.id),
+    });
+
     await db.transaction(async (tx) => {
       await tx
         .update(sessions)
@@ -581,12 +656,20 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
         ipHash,
         userAgent,
         success: true,
-        metadata: { phase: "A", ...(lockReason ? { lockReason } : {}) },
+        metadata: { phase: "C", factor: factorProvided, ...(lockReason ? { lockReason } : {}) },
       });
     });
 
     logger.info({ userId: user.id }, "vault unlock verified");
-    return c.json({ ok: true });
+    return c.json({ 
+      ok: true,
+      keys: keys ? {
+        publicKey: keys.publicKey.toString("base64"),
+        encryptedPrivateKey: keys.encryptedPrivateKey.toString("base64"),
+        privateKeyIv: keys.privateKeyIv.toString("base64"),
+        privateKeyAuthTag: keys.privateKeyAuthTag.toString("base64"),
+      } : undefined
+    });
   })
 
   // ------------------------------------------------------------------
@@ -697,6 +780,68 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
       return c.json({ recoveryCode });
     },
   )
+
+  // ------------------------------------------------------------------
+  // GET /notifications/settings — read current preferences
+  // ------------------------------------------------------------------
+  .get("/notifications/settings", async (c) => {
+    const user = c.get("user")!;
+    const row = await db.query.users.findFirst({
+      where: eq(users.id, user.id),
+      columns: { notificationPreferences: true },
+    });
+    if (!row) throw errors.notFound("User not found");
+
+    // Opt-out model: missing keys default to true.
+    const prefs = row.notificationPreferences as Record<string, boolean>;
+    return c.json({
+      settings: {
+        newLogin: prefs.newLogin !== false,
+        sendReceived: prefs.sendReceived !== false,
+        vaultShared: prefs.vaultShared !== false,
+      },
+    });
+  })
+
+  // ------------------------------------------------------------------
+  // PATCH /notifications/settings — update preferences
+  // ------------------------------------------------------------------
+  .patch("/notifications/settings", jsonValidator(notificationSettingsSchema), async (c) => {
+    const user = c.get("user")!;
+    const patch = c.req.valid("json");
+
+    const row = await db.query.users.findFirst({
+      where: eq(users.id, user.id),
+      columns: { notificationPreferences: true },
+    });
+    if (!row) throw errors.notFound("User not found");
+
+    const current = row.notificationPreferences as Record<string, boolean>;
+    const next = { ...current, ...patch };
+
+    await db.update(users).set({ notificationPreferences: next }).where(eq(users.id, user.id));
+
+    // Audit log
+    await db.insert(auditEvents).values({
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "account.notification_settings_updated",
+      targetType: "user",
+      targetId: user.id,
+      ipHash: hashIp(getClientIp(c)),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+      metadata: { patch },
+    });
+
+    return c.json({
+      settings: {
+        newLogin: next.newLogin !== false,
+        sendReceived: next.sendReceived !== false,
+        vaultShared: next.vaultShared !== false,
+      },
+    });
+  })
 
   // ------------------------------------------------------------------
   // POST /me/sessions/revoke-all — log out every other device

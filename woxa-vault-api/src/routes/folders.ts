@@ -117,13 +117,27 @@ export const vaultFolderRoutes = new Hono<{ Variables: AuthVariables }>()
     const body = c.req.valid("json");
 
     // Creating a NEW folder is a vault-level write (no folder grant can exist
-    // yet) → require a vault role with content-edit authority.
+    // folder grant can exist yet) → require a vault role with content-edit authority.
     const viewer = await loadVaultForViewer(id, user.id);
     if (!viewer) throw errors.notFound("Vault not found");
     if (!viewer.vaultRole || !canManageItem(viewer.vaultRole)) {
+      await db.insert(auditEvents).values({
+        orgId: viewer.vault.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "folder.create_failed",
+        targetType: "vault",
+        targetId: id,
+        targetName: viewer.vault.name,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: false,
+        metadata: { reason: "insufficient_role", role: viewer.vaultRole },
+      });
       throw errors.forbidden("Read-only access to this vault");
     }
     const access = { vault: viewer.vault };
+
 
     // Default position = max(position) + 1 so new folders land at the end of
     // the user's existing list. The frontend may still pass an explicit
@@ -185,15 +199,29 @@ export const folderRoutes = new Hono<{ Variables: AuthVariables }>()
     const row = await db.query.folders.findFirst({ where: eq(folders.id, id) });
     if (!row) throw errors.notFound("Folder not found");
 
+    const viewer = await loadVaultForViewer(row.vaultId, user.id);
+    if (!viewer) throw errors.notFound("Folder not found");
+    const access = { vault: viewer.vault };
+
     // EFFECTIVE folder role (folder grant → vault membership).
     const role = await resolveFolderRole(user.id, { id: row.id, vaultId: row.vaultId });
     if (!role) throw errors.notFound("Folder not found");
     if (!canManageItem(role)) {
+      await db.insert(auditEvents).values({
+        orgId: access.vault.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "folder.update_failed",
+        targetType: "folder",
+        targetId: id,
+        targetName: row.name,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: false,
+        metadata: { reason: "insufficient_role", role },
+      });
       throw errors.forbidden("Read-only access to this vault");
     }
-    const viewer = await loadVaultForViewer(row.vaultId, user.id);
-    if (!viewer) throw errors.notFound("Folder not found");
-    const access = { vault: viewer.vault };
 
     if (Object.keys(body).length === 0) {
       return c.json({ folder: toDto(row) });
@@ -237,14 +265,28 @@ export const folderRoutes = new Hono<{ Variables: AuthVariables }>()
     const row = await db.query.folders.findFirst({ where: eq(folders.id, id) });
     if (!row) throw errors.notFound("Folder not found");
 
-    const role = await resolveFolderRole(user.id, { id: row.id, vaultId: row.vaultId });
-    if (!role) throw errors.notFound("Folder not found");
-    if (!canManageItem(role)) {
-      throw errors.forbidden("Read-only access to this vault");
-    }
     const viewer = await loadVaultForViewer(row.vaultId, user.id);
     if (!viewer) throw errors.notFound("Folder not found");
     const access = { vault: viewer.vault };
+
+    const role = await resolveFolderRole(user.id, { id: row.id, vaultId: row.vaultId });
+    if (!role) throw errors.notFound("Folder not found");
+    if (!canManageItem(role)) {
+      await db.insert(auditEvents).values({
+        orgId: access.vault.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "folder.delete_failed",
+        targetType: "folder",
+        targetId: id,
+        targetName: row.name,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: false,
+        metadata: { reason: "insufficient_role", role },
+      });
+      throw errors.forbidden("Read-only access to this vault");
+    }
 
     // FK on items.folder_id is ON DELETE SET NULL — items survive the folder
     // delete and end up unfiled. Audit row written in the same transaction.

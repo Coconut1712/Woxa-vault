@@ -5,13 +5,19 @@ import { db } from "@/db/client";
 import {
   auditEvents,
   folderMembers,
+  folderTeamMembers,
   folders,
   itemMembers,
+  itemTeamMembers,
   items,
   orgMembers,
+  teamMembers,
+  teams,
   users,
   vaultMembers,
+  vaultTeamMembers,
   vaults,
+  vaultKeys,
   type Vault,
 } from "@/db/schema";
 import { errors } from "@/lib/errors";
@@ -56,22 +62,74 @@ async function loadVaultForUser(
   vaultId: string,
   userId: string,
 ): Promise<{ vault: Vault; role: Role } | null> {
-  const row = await db
+  const vaultRow = await db.query.vaults.findFirst({
+    where: and(eq(vaults.id, vaultId), isNull(vaults.deletedAt)),
+  });
+  if (!vaultRow) return null;
+
+  // 1. Individual membership
+  const userGrant = await db
     .select({
-      vault: vaults,
       role: vaultMembers.role,
+      originalRole: vaultMembers.originalRole,
+      expiresAt: vaultMembers.expiresAt,
     })
-    .from(vaults)
-    .innerJoin(
-      vaultMembers,
-      and(eq(vaultMembers.vaultId, vaults.id), eq(vaultMembers.userId, userId)),
-    )
-    .where(and(eq(vaults.id, vaultId), isNull(vaults.deletedAt)))
+    .from(vaultMembers)
+    .where(and(eq(vaultMembers.vaultId, vaultId), eq(vaultMembers.userId, userId)))
     .limit(1);
 
-  const first = row[0];
-  if (!first) return null;
-  return { vault: first.vault, role: first.role as Role };
+  let userRole: Role | null = null;
+  if (userGrant[0]) {
+    const g = userGrant[0];
+    if (g.expiresAt && g.expiresAt < new Date()) {
+      userRole = (g.originalRole as Role) ?? null;
+    } else {
+      userRole = g.role as Role;
+    }
+  }
+
+  // 2. Team memberships
+  const teamGrants = await db
+    .select({
+      role: vaultTeamMembers.role,
+      originalRole: vaultTeamMembers.originalRole,
+      expiresAt: vaultTeamMembers.expiresAt,
+    })
+    .from(vaultTeamMembers)
+    .innerJoin(teamMembers, eq(teamMembers.teamId, vaultTeamMembers.teamId))
+    .where(and(eq(vaultTeamMembers.vaultId, vaultId), eq(teamMembers.userId, userId)));
+  
+  let teamRole: Role | null = null;
+  const activeTeamRoles = teamGrants
+    .map(g => {
+      if (g.expiresAt && g.expiresAt < new Date()) {
+        return (g.originalRole as Role) ?? null;
+      }
+      return g.role as Role;
+    })
+    .filter((r): r is Role => r !== null);
+
+  if (activeTeamRoles.length > 0) {
+    // Sort by role rank and pick the highest.
+    const ranks = { manager: 3, editor: 2, user: 1, viewer: 0 };
+    teamRole = activeTeamRoles.reduce((prev, curr) => 
+      ranks[curr] > ranks[prev] ? curr : prev
+    );
+  }
+
+  // Pick the highest between user and team roles.
+  const ranks = { manager: 3, editor: 2, user: 1, viewer: 0 };
+  let finalRole: Role | null = null;
+  
+  if (userRole && teamRole) {
+    finalRole = ranks[userRole] > ranks[teamRole] ? userRole : teamRole;
+  } else {
+    finalRole = userRole || teamRole;
+  }
+
+  if (!finalRole) return null;
+
+  return { vault: vaultRow, role: finalRole };
 }
 
 // Load a vault for a SURFACING (read-only) caller. Access is granted when the
@@ -91,31 +149,47 @@ async function loadVaultForViewer(
   });
   if (!vaultRow) return null;
 
-  // Direct vault membership (the common path).
-  const member = await db
-    .select({ role: vaultMembers.role })
-    .from(vaultMembers)
-    .where(and(eq(vaultMembers.vaultId, vaultId), eq(vaultMembers.userId, userId)))
-    .limit(1);
-  if (member[0]) return { vault: vaultRow, vaultRole: member[0].role as Role };
+  // 1. Direct vault role (User or Team)
+  const access = await loadVaultForUser(vaultId, userId);
+  if (access) return { vault: vaultRow, vaultRole: access.role };
 
-  // Sub-grant: any folder grant for a folder in this vault.
-  const folderGrant = await db
-    .select({ folderId: folderMembers.folderId })
+  // 2. Sub-grant: any folder grant for a folder in this vault (User or Team).
+  const userFolderGrants = await db
+    .select({ expiresAt: folderMembers.expiresAt })
     .from(folderMembers)
     .innerJoin(folders, eq(folders.id, folderMembers.folderId))
-    .where(and(eq(folders.vaultId, vaultId), eq(folderMembers.userId, userId)))
-    .limit(1);
-  if (folderGrant[0]) return { vault: vaultRow, vaultRole: null };
+    .where(and(eq(folders.vaultId, vaultId), eq(folderMembers.userId, userId)));
+  
+  const teamFolderGrants = await db
+    .select({ expiresAt: folderTeamMembers.expiresAt })
+    .from(folderTeamMembers)
+    .innerJoin(folders, eq(folders.id, folderTeamMembers.folderId))
+    .innerJoin(teamMembers, eq(teamMembers.teamId, folderTeamMembers.teamId))
+    .where(and(eq(folders.vaultId, vaultId), eq(teamMembers.userId, userId)));
+  
+  const hasActiveFolderGrant = [...userFolderGrants, ...teamFolderGrants]
+    .some(g => !g.expiresAt || g.expiresAt >= new Date());
+  
+  if (hasActiveFolderGrant) return { vault: vaultRow, vaultRole: null };
 
-  // Sub-grant: any item grant for an item in this vault.
-  const itemGrant = await db
-    .select({ itemId: itemMembers.itemId })
+  // 3. Sub-grant: any item grant for an item in this vault (User or Team).
+  const userItemGrants = await db
+    .select({ expiresAt: itemMembers.expiresAt })
     .from(itemMembers)
     .innerJoin(items, eq(items.id, itemMembers.itemId))
-    .where(and(eq(items.vaultId, vaultId), eq(itemMembers.userId, userId)))
-    .limit(1);
-  if (itemGrant[0]) return { vault: vaultRow, vaultRole: null };
+    .where(and(eq(items.vaultId, vaultId), eq(itemMembers.userId, userId)));
+
+  const teamItemGrants = await db
+    .select({ expiresAt: itemTeamMembers.expiresAt })
+    .from(itemTeamMembers)
+    .innerJoin(items, eq(items.id, itemTeamMembers.itemId))
+    .innerJoin(teamMembers, eq(teamMembers.teamId, itemTeamMembers.teamId))
+    .where(and(eq(items.vaultId, vaultId), eq(teamMembers.userId, userId)));
+
+  const hasActiveItemGrant = [...userItemGrants, ...teamItemGrants]
+    .some(g => !g.expiresAt || g.expiresAt >= new Date());
+  
+  if (hasActiveItemGrant) return { vault: vaultRow, vaultRole: null };
 
   return null;
 }
@@ -198,6 +272,9 @@ const createSchema = z.object({
   description: z.string().trim().max(500).nullable().optional(),
   iconKey: z.string().trim().max(60).nullable().optional(),
   color: colorSchema.nullable().optional(),
+  // Phase C: ZK fields
+  encryptionVersion: z.number().optional(),
+  wrappedKey: z.string().optional(), // base64
 });
 
 const patchSchema = z.object({
@@ -285,7 +362,21 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
       (a, b) => b.vault.updatedAt.getTime() - a.vault.updatedAt.getTime(),
     );
 
-    if (allRows.length === 0) return c.json({ vaults: [] });
+    if (allRows.length === 0) {
+      await db.insert(auditEvents).values({
+        orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "vault.list_viewed",
+        targetType: "organization",
+        targetId: orgId,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: true,
+        metadata: { vaultCount: 0 },
+      });
+      return c.json({ vaults: [] });
+    }
 
     // Bulk-count items + members per vault in two single round-trips.
     const vaultIds = allRows.map((r) => r.vault.id);
@@ -302,6 +393,19 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
 
     const itemCountMap = new Map(itemCounts.map((r) => [r.vaultId, Number(r.c)]));
     const memberCountMap = new Map(memberCounts.map((r) => [r.vaultId, Number(r.c)]));
+
+    await db.insert(auditEvents).values({
+      orgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "vault.list_viewed",
+      targetType: "organization",
+      targetId: orgId,
+      ipHash: hashIp(getClientIp(c)),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+      metadata: { vaultCount: allRows.length },
+    });
 
     return c.json({
       vaults: allRows.map((r) =>
@@ -335,6 +439,7 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
           iconKey: body.iconKey ?? null,
           color: body.color ?? null,
           createdBy: user.id,
+          encryptionVersion: body.encryptionVersion ?? 1,
         })
         .returning();
       if (!vaultRow) throw new Error("vault insert returned no row");
@@ -344,6 +449,16 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
         userId: user.id,
         role: "manager",
       });
+
+      // Phase C: If wrappedKey provided, store it
+      if (body.wrappedKey) {
+        await tx.insert(vaultKeys).values({
+          vaultId: vaultRow.id,
+          userId: user.id,
+          wrappedKey: Buffer.from(body.wrappedKey, "base64"),
+          wrapAlgo: "x25519-aes256gcm",
+        });
+      }
 
       await tx.insert(auditEvents).values({
         orgId,
@@ -356,6 +471,7 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
         ipHash: hashIp(getClientIp(c)),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
+        metadata: { encryptionVersion: vaultRow.encryptionVersion },
       });
 
       return vaultRow;
@@ -393,8 +509,33 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
       .innerJoin(users, eq(users.id, vaultMembers.userId))
       .where(eq(vaultMembers.vaultId, id));
 
+    // Phase C: If ZK, fetch wrapped key for the caller
+    let wrappedKey: string | null = null;
+    if (access.vault.encryptionVersion === 2) {
+      const k = await db.query.vaultKeys.findFirst({
+        where: and(eq(vaultKeys.vaultId, id), eq(vaultKeys.userId, user.id)),
+      });
+      if (k) {
+        wrappedKey = k.wrappedKey.toString("base64");
+      }
+    }
+
+    await db.insert(auditEvents).values({
+      orgId: access.vault.orgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "vault.view",
+      targetType: "vault",
+      targetId: id,
+      targetName: access.vault.name,
+      ipHash: hashIp(getClientIp(c)),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+    });
+
     return c.json({
       vault: toFull(access.vault, vaultRole, itemCount, memberRows.length),
+      wrappedKey,
       members: memberRows.map((m) => ({
         userId: m.userId,
         email: m.email,
@@ -411,7 +552,22 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
 
     const access = await loadVaultForUser(id, user.id);
     if (!access) throw errors.notFound("Vault not found");
-    if (!canEditVault(access.role)) throw errors.forbidden("Only managers may edit this vault");
+    if (!canEditVault(access.role)) {
+      await db.insert(auditEvents).values({
+        orgId: access.vault.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "vault.update_failed",
+        targetType: "vault",
+        targetId: id,
+        targetName: access.vault.name,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: false,
+        metadata: { reason: "insufficient_role", role: access.role },
+      });
+      throw errors.forbidden("Only managers may edit this vault");
+    }
 
     if (Object.keys(body).length === 0) {
       // Nothing to update — return the current vault for symmetry.
@@ -487,6 +643,19 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
     const access = await loadVaultForUser(id, user.id);
     if (!access) throw errors.notFound("Vault not found");
     if (!canEditVault(access.role)) {
+      await db.insert(auditEvents).values({
+        orgId: access.vault.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "vault.delete_failed",
+        targetType: "vault",
+        targetId: id,
+        targetName: access.vault.name,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: false,
+        metadata: { reason: "insufficient_role", role: access.role },
+      });
       throw errors.forbidden("Only managers may delete this vault");
     }
 
@@ -497,6 +666,20 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
       .where(and(eq(items.vaultId, id), isNull(items.deletedAt)));
     const itemCount = Number(itemCountRow[0]?.value ?? 0);
     if (itemCount > 0) {
+      await db.insert(auditEvents).values({
+        orgId: access.vault.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "vault.delete_failed",
+        targetType: "vault",
+        targetId: id,
+        targetName: access.vault.name,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: false,
+        metadata: { reason: "vault_not_empty", itemCount },
+      });
+
       // 409 conflict.
       return c.json(
         {

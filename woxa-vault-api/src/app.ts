@@ -15,12 +15,15 @@ import { folderMemberRoutes } from "@/routes/folderMembers";
 import { folderRoutes, vaultFolderRoutes } from "@/routes/folders";
 import { itemMemberRoutes } from "@/routes/itemMembers";
 import { healthRoutes } from "@/routes/health";
+import { importRoutes } from "@/routes/imports";
 import { invitationRoutes } from "@/routes/invitations";
 import { itemActivityRoutes } from "@/routes/itemActivity";
 import { itemRoutes, vaultItemRoutes } from "@/routes/items";
 import { meRoutes } from "@/routes/me";
 import { memberRoutes } from "@/routes/members";
+import { teamRoutes } from "@/routes/teams";
 import { notificationRoutes } from "@/routes/notifications";
+import { accessRequestRoutes } from "@/routes/accessRequests";
 import { publicSendRoutes, sendRoutes } from "@/routes/sends";
 import { ssoRoutes } from "@/routes/sso";
 import { trashRoutes } from "@/routes/trash";
@@ -72,6 +75,7 @@ export function createApp() {
   app.use("*", sessionMiddleware);
 
   app.route("/health", healthRoutes);
+  app.route("/imports", importRoutes);
   app.route("/auth", authRoutes);
   app.route("/auth/sso", ssoRoutes);
   // 2FA endpoints live under /auth/2fa. /verify-login is intentionally public
@@ -81,6 +85,8 @@ export function createApp() {
   app.route("/me", meRoutes);
   app.route("/workspace", workspaceRoutes);
   app.route("/members", memberRoutes);
+  app.route("/teams", teamRoutes);
+  app.route("/access-requests", accessRequestRoutes);
   // Vault sub-routers (items, folders, members) all attach to /vaults/:id/...
   // and MUST mount before the generic vaultRoutes so the parameterized child
   // paths take priority over `/:id` handlers on the same prefix.

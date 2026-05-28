@@ -67,6 +67,11 @@ const createSchema = z.object({
   favorite: z.boolean().optional(),
   totpSecret: z.string().nullable().optional(),
   customFields: z.array(z.unknown()).optional(),
+  // Phase C: ZK fields
+  passwordCiphertext: z.string().optional(), // base64
+  passwordIv: z.string().optional(), // base64
+  notesCiphertext: z.string().optional(), // base64
+  notesIv: z.string().optional(), // base64
 });
 
 const patchSchema = z.object({
@@ -76,6 +81,20 @@ const patchSchema = z.object({
   password: z.string().max(8192).nullable().optional(),
   notes: z.string().max(32768).nullable().optional(),
   folderId: z.string().uuid().nullable().optional(),
+  // Phase C: ZK fields
+  passwordCiphertext: z.string().optional(), // base64
+  passwordIv: z.string().optional(),
+  notesCiphertext: z.string().optional(),
+  notesIv: z.string().optional(),
+});
+
+const bulkSchema = z.object({
+  action: z.enum(["delete", "move", "share"]),
+  itemIds: z.array(z.string().uuid()).min(1).max(100),
+  payload: z.object({
+    folderId: z.string().uuid().nullable().optional(),
+    vaultId: z.string().uuid().optional(), // For future cross-vault move
+  }).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -198,28 +217,12 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     const access = await loadItemForUser(id, user.id);
     if (!access) throw errors.notFound("Item not found");
 
-    // REVEAL gate (DESIGN.md §11): a viewer is metadata-only — they may SEE the
-    // item via GET /:id but may NOT decrypt its password. They have access, so
-    // 403 (not 404) is correct here and is not an enumeration leak.
     if (!canRevealItem(access.role)) {
       throw errors.forbidden("Read-only access to this item");
     }
 
-    let dek: Buffer | null = null;
-    try {
-      const password =
-        access.item.passwordCiphertext && access.item.passwordIv
-          ? (() => {
-              dek = unwrapDek({
-                dekCiphertext: access.item.dekCiphertext,
-                dekIv: access.item.dekIv,
-              });
-              return decryptField(dek, access.item.passwordCiphertext, access.item.passwordIv);
-            })()
-          : null;
-
-      // item.reveal is the REAL "Secret revealed" event — emitted only when the
-      // plaintext password is handed to the caller.
+    // Phase C: If ZK, return encrypted fields
+    if (access.vault.encryptionVersion === 2) {
       await db.insert(auditEvents).values({
         orgId: access.vault.orgId,
         actorUserId: user.id,
@@ -231,6 +234,41 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
         ipHash: hashIp(getClientIp(c)),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
+        metadata: { encryptionVersion: 2 },
+      });
+
+      return c.json({
+        passwordCiphertext: access.item.passwordCiphertext?.toString("base64"),
+        passwordIv: access.item.passwordIv?.toString("base64"),
+      });
+    }
+
+    // Phase A: Server-side mode
+    let dek: Buffer | null = null;
+    try {
+      const password =
+        access.item.passwordCiphertext && access.item.passwordIv
+          ? (() => {
+              dek = unwrapDek({
+                dekCiphertext: access.item.dekCiphertext!,
+                dekIv: access.item.dekIv!,
+              });
+              return decryptField(dek, access.item.passwordCiphertext, access.item.passwordIv);
+            })()
+          : null;
+
+      await db.insert(auditEvents).values({
+        orgId: access.vault.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "item.reveal",
+        targetType: "item",
+        targetId: access.item.id,
+        targetName: access.item.name,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: true,
+        metadata: { encryptionVersion: 1 },
       });
 
       return c.json({ password });
@@ -256,17 +294,44 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     const summary = toSummary(access.item, creator);
     summary.effectiveRole = access.role;
 
+    // Phase C: If ZK, return encrypted fields
+    if (access.vault.encryptionVersion === 2) {
+      const full = {
+        ...summary,
+        password: null,
+        notes: null,
+        notesCiphertext: access.item.notesCiphertext?.toString("base64"),
+        notesIv: access.item.notesIv?.toString("base64"),
+        totpSecret: null,
+        customFields: [],
+      };
+
+      await db.insert(auditEvents).values({
+        orgId: access.vault.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "item.view",
+        targetType: "item",
+        targetId: access.item.id,
+        targetName: access.item.name,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: true,
+        metadata: { encryptionVersion: 2 },
+      });
+
+      return c.json({ item: full });
+    }
+
+    // Phase A: Server-side mode
     let dek: Buffer | null = null;
     try {
-      // Notes are returned to ALL roles with access (incl. viewer) — the
-      // frontend depends on them for non-secret metadata. The password is
-      // ALWAYS withheld here regardless of role.
       const notes =
         access.item.notesCiphertext && access.item.notesIv
           ? (() => {
               dek = unwrapDek({
-                dekCiphertext: access.item.dekCiphertext,
-                dekIv: access.item.dekIv,
+                dekCiphertext: access.item.dekCiphertext!,
+                dekIv: access.item.dekIv!,
               });
               return decryptField(dek, access.item.notesCiphertext, access.item.notesIv);
             })()
@@ -291,6 +356,7 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
         ipHash: hashIp(getClientIp(c)),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
+        metadata: { encryptionVersion: 1 },
       });
 
       return c.json({ item: full });
@@ -308,79 +374,89 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     if (!access) throw errors.notFound("Item not found");
     if (!canManageItem(access.role)) throw errors.forbidden("Read-only access to this vault");
 
-    // Re-encrypt only the fields the caller sent. Omitted → untouched.
-    let dek: Buffer | null = null;
-    try {
-      const patch: Partial<typeof items.$inferInsert> = { updatedAt: new Date() };
-      const needsDek =
-        body.password !== undefined || body.notes !== undefined;
-      if (needsDek) {
-        dek = unwrapDek({
-          dekCiphertext: access.item.dekCiphertext,
-          dekIv: access.item.dekIv,
-        });
-      }
+    const patch: Partial<typeof items.$inferInsert> = { updatedAt: new Date() };
 
-      if (body.name !== undefined) patch.name = body.name;
-      if (body.username !== undefined) patch.username = body.username;
-      if (body.url !== undefined) patch.url = body.url;
-      if (body.folderId !== undefined) {
-        // Moving to a folder requires the folder to live in this item's
-        // vault; null clears the assignment.
-        if (body.folderId !== null) {
-          const f = await db.query.folders.findFirst({
-            where: eq(folders.id, body.folderId),
+    if (body.name !== undefined) patch.name = body.name;
+    if (body.username !== undefined) patch.username = body.username;
+    if (body.url !== undefined) patch.url = body.url;
+    if (body.folderId !== undefined) {
+      if (body.folderId !== null) {
+        const f = await db.query.folders.findFirst({
+          where: eq(folders.id, body.folderId),
+        });
+        if (!f || f.vaultId !== access.item.vaultId) {
+          throw errors.notFound("Folder not found");
+        }
+      }
+      patch.folderId = body.folderId;
+    }
+
+    if (access.vault.encryptionVersion === 2) {
+      // Phase C: ZK mode - trust client ciphertexts
+      if (body.passwordCiphertext !== undefined) {
+        patch.passwordCiphertext = body.passwordCiphertext ? Buffer.from(body.passwordCiphertext, "base64") : null;
+        patch.passwordIv = body.passwordIv ? Buffer.from(body.passwordIv, "base64") : null;
+      }
+      if (body.notesCiphertext !== undefined) {
+        patch.notesCiphertext = body.notesCiphertext ? Buffer.from(body.notesCiphertext, "base64") : null;
+        patch.notesIv = body.notesIv ? Buffer.from(body.notesIv, "base64") : null;
+      }
+    } else {
+      // Phase A: Server-side mode
+      let dek: Buffer | null = null;
+      try {
+        const needsDek = body.password !== undefined || body.notes !== undefined;
+        if (needsDek) {
+          dek = unwrapDek({
+            dekCiphertext: access.item.dekCiphertext!,
+            dekIv: access.item.dekIv!,
           });
-          if (!f || f.vaultId !== access.item.vaultId) {
-            throw errors.notFound("Folder not found");
+        }
+
+        if (body.password !== undefined) {
+          if (body.password === null || body.password === "") {
+            patch.passwordCiphertext = null;
+            patch.passwordIv = null;
+          } else {
+            const enc = encryptField(dek!, body.password);
+            patch.passwordCiphertext = enc.ciphertext;
+            patch.passwordIv = enc.iv;
           }
         }
-        patch.folderId = body.folderId;
-      }
-
-      if (body.password !== undefined) {
-        if (body.password === null || body.password === "") {
-          patch.passwordCiphertext = null;
-          patch.passwordIv = null;
-        } else {
-          const enc = encryptField(dek!, body.password);
-          patch.passwordCiphertext = enc.ciphertext;
-          patch.passwordIv = enc.iv;
+        if (body.notes !== undefined) {
+          if (body.notes === null || body.notes === "") {
+            patch.notesCiphertext = null;
+            patch.notesIv = null;
+          } else {
+            const enc = encryptField(dek!, body.notes);
+            patch.notesCiphertext = enc.ciphertext;
+            patch.notesIv = enc.iv;
+          }
         }
+      } finally {
+        zeroize(dek);
       }
-      if (body.notes !== undefined) {
-        if (body.notes === null || body.notes === "") {
-          patch.notesCiphertext = null;
-          patch.notesIv = null;
-        } else {
-          const enc = encryptField(dek!, body.notes);
-          patch.notesCiphertext = enc.ciphertext;
-          patch.notesIv = enc.iv;
-        }
-      }
-
-      const [updated] = await db.update(items).set(patch).where(eq(items.id, id)).returning();
-      if (!updated) throw errors.notFound("Item not found");
-
-      await db.insert(auditEvents).values({
-        orgId: access.vault.orgId,
-        actorUserId: user.id,
-        actorEmail: user.email,
-        action: "item.update",
-        targetType: "item",
-        targetId: id,
-        targetName: updated.name,
-        ipHash: hashIp(getClientIp(c)),
-        userAgent: c.req.header("user-agent") ?? null,
-        success: true,
-        metadata: { fields: Object.keys(body) },
-      });
-
-      const creator = await creatorFor(updated);
-      return c.json({ item: toSummary(updated, creator) });
-    } finally {
-      zeroize(dek);
     }
+
+    const [updated] = await db.update(items).set(patch).where(eq(items.id, id)).returning();
+    if (!updated) throw errors.notFound("Item not found");
+
+    await db.insert(auditEvents).values({
+      orgId: access.vault.orgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "item.update",
+      targetType: "item",
+      targetId: id,
+      targetName: updated.name,
+      ipHash: hashIp(getClientIp(c)),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+      metadata: { fields: Object.keys(body), encryptionVersion: access.vault.encryptionVersion },
+    });
+
+    const creator = await creatorFor(updated);
+    return c.json({ item: toSummary(updated, creator) });
   })
 
   .delete("/:id", paramValidator(uuidParam), async (c) => {
@@ -417,6 +493,87 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     });
 
     return c.body(null, 204);
+  })
+
+  .post("/bulk", jsonValidator(bulkSchema), async (c) => {
+    const user = c.get("user")!;
+    const { action, itemIds, payload } = c.req.valid("json");
+
+    const results = {
+      success: [] as string[],
+      failed: [] as { id: string; reason: string }[],
+    };
+
+    await db.transaction(async (tx) => {
+      for (const id of itemIds) {
+        try {
+          const access = await loadItemForUser(id, user.id);
+          if (!access) {
+            results.failed.push({ id, reason: "not_found" });
+            continue;
+          }
+
+          if (!canManageItem(access.role)) {
+            results.failed.push({ id, reason: "forbidden" });
+            continue;
+          }
+
+          if (action === "delete") {
+            await tx
+              .update(items)
+              .set({ deletedAt: new Date(), deletedBy: user.id })
+              .where(eq(items.id, id));
+            
+            await tx.insert(auditEvents).values({
+              orgId: access.vault.orgId,
+              actorUserId: user.id,
+              actorEmail: user.email,
+              action: "item.delete",
+              targetType: "item",
+              targetId: id,
+              targetName: access.item.name,
+              ipHash: hashIp(getClientIp(c)),
+              userAgent: c.req.header("user-agent") ?? null,
+              success: true,
+              metadata: { bulk: true },
+            });
+          } else if (action === "move") {
+            const folderId = payload?.folderId ?? null;
+            if (folderId) {
+              const f = await tx.query.folders.findFirst({
+                where: eq(folders.id, folderId),
+              });
+              if (!f || f.vaultId !== access.item.vaultId) {
+                results.failed.push({ id, reason: "folder_not_found" });
+                continue;
+              }
+            }
+
+            await tx.update(items).set({ folderId, updatedAt: new Date() }).where(eq(items.id, id));
+
+            await tx.insert(auditEvents).values({
+              orgId: access.vault.orgId,
+              actorUserId: user.id,
+              actorEmail: user.email,
+              action: "item.update",
+              targetType: "item",
+              targetId: id,
+              targetName: access.item.name,
+              ipHash: hashIp(getClientIp(c)),
+              userAgent: c.req.header("user-agent") ?? null,
+              success: true,
+              metadata: { bulk: true, fields: ["folderId"] },
+            });
+          }
+
+          results.success.push(id);
+        } catch (err: any) {
+          results.failed.push({ id, reason: err.message });
+        }
+      }
+    });
+
+    return c.json(results);
   });
 
 export type ItemRoutes = typeof itemRoutes;
@@ -501,6 +658,19 @@ export const vaultItemRoutes = new Hono<{
       out.push(summary);
     }
 
+    await db.insert(auditEvents).values({
+      orgId: viewer.vault.orgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "vault.items_viewed",
+      targetType: "vault",
+      targetId: id,
+      targetName: viewer.vault.name,
+      ipHash: hashIp(getClientIp(c)),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+    });
+
     return c.json({ items: out });
   })
 
@@ -540,26 +710,11 @@ export const vaultItemRoutes = new Hono<{
         throw errors.forbidden("Read-only access to this vault");
       }
 
-      // Generate a fresh DEK, encrypt password/notes if present, then wrap
-      // the DEK before persisting. Plaintext DEK is zeroized in `finally`.
-      const { dek, wrapped } = generateWrappedDek();
-      try {
-        let pwCipher: Buffer | null = null;
-        let pwIv: Buffer | null = null;
-        let notesCipher: Buffer | null = null;
-        let notesIv: Buffer | null = null;
-        if (body.password) {
-          const e = encryptField(dek, body.password);
-          pwCipher = e.ciphertext;
-          pwIv = e.iv;
-        }
-        if (body.notes) {
-          const e = encryptField(dek, body.notes);
-          notesCipher = e.ciphertext;
-          notesIv = e.iv;
-        }
+      let created: Item;
 
-        const [created] = await db
+      if (viewer.vault.encryptionVersion === 2) {
+        // Phase C: ZK mode
+        const [row] = await db
           .insert(items)
           .values({
             vaultId: id,
@@ -568,39 +723,78 @@ export const vaultItemRoutes = new Hono<{
             username: body.username ?? null,
             url: body.url ?? null,
             folderId: body.folderId ?? null,
-            passwordCiphertext: pwCipher,
-            passwordIv: pwIv,
-            notesCiphertext: notesCipher,
-            notesIv: notesIv,
-            dekCiphertext: wrapped.dekCiphertext,
-            dekIv: wrapped.dekIv,
+            passwordCiphertext: body.passwordCiphertext ? Buffer.from(body.passwordCiphertext, "base64") : null,
+            passwordIv: body.passwordIv ? Buffer.from(body.passwordIv, "base64") : null,
+            notesCiphertext: body.notesCiphertext ? Buffer.from(body.notesCiphertext, "base64") : null,
+            notesIv: body.notesIv ? Buffer.from(body.notesIv, "base64") : null,
+            dekCiphertext: null,
+            dekIv: null,
             createdBy: user.id,
           })
           .returning();
-        if (!created) throw new Error("item insert returned no row");
+        created = row!;
+      } else {
+        // Phase A: Server-side mode
+        const { dek, wrapped } = generateWrappedDek();
+        try {
+          let pwCipher: Buffer | null = null;
+          let pwIv: Buffer | null = null;
+          let notesCipher: Buffer | null = null;
+          let notesIv: Buffer | null = null;
+          if (body.password) {
+            const e = encryptField(dek, body.password);
+            pwCipher = e.ciphertext;
+            pwIv = e.iv;
+          }
+          if (body.notes) {
+            const e = encryptField(dek, body.notes);
+            notesCipher = e.ciphertext;
+            notesIv = e.iv;
+          }
 
-        await db.insert(auditEvents).values({
-          orgId: viewer.vault.orgId,
-          actorUserId: user.id,
-          actorEmail: user.email,
-          action: "item.create",
-          targetType: "item",
-          targetId: created.id,
-          targetName: created.name,
-          ipHash: hashIp(getClientIp(c)),
-          userAgent: c.req.header("user-agent") ?? null,
-          success: true,
-          metadata: { type: created.type },
-        });
-
-        const creator = {
-          id: user.id,
-          displayName: user.displayName ?? user.name ?? user.email,
-        };
-        return c.json({ item: toSummary(created, creator) }, 201);
-      } finally {
-        zeroize(dek);
+          const [row] = await db
+            .insert(items)
+            .values({
+              vaultId: id,
+              type: body.type,
+              name: body.name,
+              username: body.username ?? null,
+              url: body.url ?? null,
+              folderId: body.folderId ?? null,
+              passwordCiphertext: pwCipher,
+              passwordIv: pwIv,
+              notesCiphertext: notesCipher,
+              notesIv: notesIv,
+              dekCiphertext: wrapped.dekCiphertext,
+              dekIv: wrapped.dekIv,
+              createdBy: user.id,
+            })
+            .returning();
+          created = row!;
+        } finally {
+          zeroize(dek);
+        }
       }
+
+      await db.insert(auditEvents).values({
+        orgId: viewer.vault.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "item.create",
+        targetType: "item",
+        targetId: created.id,
+        targetName: created.name,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: true,
+        metadata: { encryptionVersion: viewer.vault.encryptionVersion },
+      });
+
+      const creator = {
+        id: user.id,
+        displayName: user.displayName ?? user.name ?? user.email,
+      };
+      return c.json({ item: toSummary(created, creator) }, 201);
     },
   );
 

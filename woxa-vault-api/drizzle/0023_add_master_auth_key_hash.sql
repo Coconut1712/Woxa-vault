@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "master_auth_key_hash" text;

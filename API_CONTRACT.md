@@ -726,6 +726,74 @@ enrolls. The frontend keys off it to force the `/setup-2fa` screen.
 | --- | --- | --- |
 | `two_factor_required` | a require2fa workspace gates an un-enrolled member from a secret-bearing route | 403 |
 
+### Workspace integrations
+
+Catalog of third-party connectors for the **active** workspace. Google Workspace status is **derived** from the existing `sso.allowedDomains` policy (configure domains via `PATCH /workspace/settings`, not a separate Google PATCH). Slack is the only connector with a persisted credential today (incoming webhook URL stored in `organizations.settings.integrations.slack`).
+
+```ts
+type WorkspaceIntegrationId =
+  | "google_workspace"
+  | "slack"
+  | "github"
+  | "microsoft_entra"
+  | "datadog"
+  | "pagerduty";
+
+type WorkspaceIntegrationStatus =
+  | "connected"      // ready / configured for this workspace
+  | "available"      // can be configured now
+  | "coming_soon"    // catalog entry only — no connect flow yet
+  | "unavailable";   // platform prerequisite missing (e.g. Google OAuth env)
+
+interface WorkspaceIntegration {
+  id: WorkspaceIntegrationId;
+  status: WorkspaceIntegrationStatus;
+  summary: string | null;   // non-secret hint (domain count, masked webhook tail)
+  connectedAt: string | null;
+}
+```
+
+Status rules:
+- **google_workspace** — `unavailable` when the deployment has no Google OAuth env (`GOOGLE_OAUTH_CLIENT_ID` + secret + redirect URI). Otherwise `connected` when this workspace's `sso.allowedDomains` is non-empty, else `available`. `summary` echoes the allowed-domain count when connected.
+- **slack** — `connected` when a valid incoming webhook is stored; `available` otherwise. `summary` is a masked tail (`••••` + last 8 chars) — the full URL is **never** returned.
+- **github / microsoft_entra / datadog / pagerduty** — always `coming_soon`.
+
+#### `GET /workspace/integrations`
+Auth required. Readable by **any member** (same visibility as `GET /workspace/settings`). Org resolved from the active workspace — no client org id.
+```json
+{
+  "integrations": WorkspaceIntegration[],
+  "platform": { "googleSsoConfigured": true }
+}
+```
+`404 not_found` if the caller has no workspace membership.
+
+#### `PATCH /workspace/integrations/slack`
+**Owner + admin only** (`403 forbidden` otherwise). Rate-limited 20/hour/user (`429 rate_limited` + `Retry-After`). Audited as `workspace.integration_updated` with `metadata: { integration: "slack", connected: boolean }` (webhook URL never echoed).
+
+Connect:
+```json
+{ "webhookUrl": "https://hooks.slack.com/services/T000/B000/XXXXXXXX" }
+```
+- Must match `^https://hooks\.slack\.com/services/…` (Zod). Stored with `connectedAt` (ISO timestamp).
+
+Disconnect:
+```json
+{ "disconnect": true }
+```
+
+Response 200 — same envelope as `GET /workspace/integrations` (full re-sync).
+
+#### `POST /workspace/integrations/slack/test`
+**Owner + admin only**. Sends a one-line test message to the stored webhook. Rate-limited 20/hour/user. Audited as `workspace.integration_tested`.
+
+- `400 validation_error` — Slack not connected, invalid stored webhook, or Slack API rejected the POST (`details.fieldErrors`).
+- Response 200: `{ "ok": true }`
+
+**Google Workspace actions (frontend-only, no new PATCH):**
+- **Configure** → navigate the admin to the SSO settings tab and edit `sso.allowedDomains` via `PATCH /workspace/settings`.
+- **Test sign-in** → top-level redirect to `GET /auth/sso/google/start` (see Auth SSO section).
+
 ### `GET /members` (extended)
 The response object now also carries `invitations` for `owner`/`admin` callers:
 ```ts
@@ -1445,6 +1513,12 @@ Last updated: 2026-05-19 by woxa-vault-backend-builder agent — **REMOVED** `PO
   - **Domain gate (`ssoDomainAllowed`)** — if any live org pins a non-empty `sso.allowedDomains`, the signing-in domain must be in at least one such list, else `/?error=sso_domain_forbidden` (gate `org_policy`). Enforced cross-org (union by domain) because new SSO users land org-less and there is no single org to consult.
   - **JIT gate (`ssoJitAllowed`)** — a brand-new user from a domain claimed only by `jitEnabled=false` org(s) is refused → `/?error=sso_jit_disabled`; admin must invite first. No org claims the domain → JIT defaults on. Re-checked inside the provisioning transaction.
 - **Still NOT built (AC-006.2):** there is no verified `org_domains` table — `sso.allowedDomains` is a flat, **unverified** `string[]`. An admin can list any domain; there is no DNS/ownership proof and no domain→org binding, which is exactly why JIT auto-join stays invitation-only (see HIGH#2). The verified-domain workflow remains a deferred follow-up.
+
+**Workspace integrations (2026-05-25):**
+- **NEW — `GET /workspace/integrations`** — catalog + per-workspace connection status. Google Workspace status is derived from `sso.allowedDomains` (configure via existing `PATCH /workspace/settings`). Slack stores an incoming webhook in `organizations.settings.integrations.slack` (URL never returned on GET — masked `summary` only).
+- **NEW — `PATCH /workspace/integrations/slack`** — connect (`{ webhookUrl }`) or disconnect (`{ disconnect: true }`). Owner+admin only; audited as `workspace.integration_updated`.
+- **NEW — `POST /workspace/integrations/slack/test`** — sends a one-line test message. Owner+admin only; audited as `workspace.integration_tested`.
+- **github / microsoft_entra / datadog / pagerduty** — catalog entries with `coming_soon` status only (no PATCH yet).
 
 **Workspace slug auto-follows name on rename (2026-05-22):**
 - **CONTRACT CHANGE — `PATCH /workspace` now regenerates the `slug` from the new name.** Previously the rename touched only `name` and left the slug frozen; now the slug is **server-derived** (`slugifyBase`) on every name change and the **response returns the NEW slug** (was the stale stored value). Body stays `{ name }` only — **no client-supplied slug** (server-derived, never-trusted; no new attacker-controlled-slug surface). Owner+admin gate + org-from-session (no IDOR) unchanged.

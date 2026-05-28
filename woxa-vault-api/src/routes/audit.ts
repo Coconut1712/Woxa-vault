@@ -7,6 +7,8 @@ import type { SQL } from "drizzle-orm";
 import { errors } from "@/lib/errors";
 import { canViewAllOrgAudit } from "@/lib/orgAccess";
 import { queryValidator } from "@/lib/validator";
+import { hashIp } from "@/lib/ipHash";
+import { getClientIp } from "@/lib/clientIp";
 import { activeOrgForContext, requireAuth, type AuthVariables } from "@/middleware/auth";
 
 // (drizzle infers AuditEvent select shape via the table import.)
@@ -157,6 +159,7 @@ export const auditRoutes = new Hono<{ Variables: AuthVariables }>()
       if (keyset) conds.push(keyset);
     }
 
+    const user = c.get("user")!;
     const rows = await db
       .select()
       .from(auditEvents)
@@ -174,6 +177,19 @@ export const auditRoutes = new Hono<{ Variables: AuthVariables }>()
         id: last.id,
       });
     }
+
+    await db.insert(auditEvents).values({
+      orgId: current.orgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "audit.log_viewed",
+      targetType: "organization",
+      targetId: current.orgId,
+      ipHash: hashIp(getClientIp(c)),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+      metadata: { filter: q },
+    });
 
     return c.json({ events: page.map(toAuditDto), nextCursor });
   });

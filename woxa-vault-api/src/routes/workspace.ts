@@ -43,6 +43,13 @@ import { isUniqueViolation } from "@/lib/pgError";
 import { jsonValidator } from "@/lib/validator";
 import { activeOrgForContext, requireAuth, type AuthVariables } from "@/middleware/auth";
 import { createHash } from "node:crypto";
+import { env } from "@/config/env";
+import {
+  buildIntegrationCatalog,
+  mergeSlackIntegration,
+  readOrgSlackIntegration,
+  slackWebhookSchema,
+} from "@/lib/orgIntegrations";
 
 // ---------------------------------------------------------------------------
 // Threat model — workspace lifecycle (creation + ownership transfer)
@@ -183,6 +190,32 @@ const DELETE_RL_WINDOW_MS = 60 * 60 * 1000;
 // way — switchers click a few times, not hundreds, per minute.
 const SWITCH_RL_LIMIT = 60;
 const SWITCH_RL_WINDOW_MS = 60 * 1000; // 1 minute
+const INTEGRATION_RL_LIMIT = 20;
+const INTEGRATION_RL_WINDOW_MS = 60 * 60 * 1000;
+
+function isGoogleSsoConfigured(): boolean {
+  return Boolean(
+    env.GOOGLE_OAUTH_CLIENT_ID &&
+      env.GOOGLE_OAUTH_CLIENT_SECRET &&
+      env.GOOGLE_OAUTH_REDIRECT_URI,
+  );
+}
+
+export const slackIntegrationSchema = z
+  .object({
+    webhookUrl: slackWebhookSchema.optional(),
+    disconnect: z.boolean().optional(),
+  })
+  .superRefine((body, ctx) => {
+    if (body.disconnect === true) return;
+    if (!body.webhookUrl) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "webhookUrl is required unless disconnect is true",
+        path: ["webhookUrl"],
+      });
+    }
+  });
 
 // Slugify the org name: lowercase, ASCII alphanum + hyphen, collapse runs,
 // trim leading/trailing hyphens, cap length. Empty result falls back to
@@ -944,6 +977,194 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         },
       },
     });
+  })
+
+  // ------------------------------------------------------------------
+  // GET /workspace/integrations — catalog + connection status for the
+  // active workspace. Readable by any member (mirrors GET /settings).
+  // ------------------------------------------------------------------
+  .get("/integrations", async (c) => {
+    const current = await activeOrgForContext(c);
+    if (!current) throw errors.notFound("No workspace found for the current user");
+
+    const orgRow = await db.query.organizations.findFirst({
+      where: eq(organizations.id, current.orgId),
+    });
+    if (!orgRow) throw errors.notFound("Workspace not found");
+
+    const googleSsoConfigured = isGoogleSsoConfigured();
+    return c.json({
+      integrations: buildIntegrationCatalog({
+        settings: orgRow.settings,
+        googleSsoConfigured,
+      }),
+      platform: { googleSsoConfigured },
+    });
+  })
+
+  // ------------------------------------------------------------------
+  // PATCH /workspace/integrations/slack — connect or disconnect Slack.
+  // Owner + admin only. Webhook URL is stored server-side and NEVER
+  // returned on GET (only a masked summary).
+  // ------------------------------------------------------------------
+  .patch("/integrations/slack", jsonValidator(slackIntegrationSchema), async (c) => {
+    const user = c.get("user")!;
+    const body = c.req.valid("json");
+    const ipHash = hashIp(getClientIp(c));
+    const userAgent = c.req.header("user-agent") ?? null;
+
+    const RL_KEY = `workspace-integration:${user.id}`;
+    const peek = peekRateLimit(RL_KEY, {
+      limit: INTEGRATION_RL_LIMIT,
+      windowMs: INTEGRATION_RL_WINDOW_MS,
+    });
+    if (!peek.allowed) {
+      const retry = Math.ceil(peek.resetMs / 1000);
+      c.header("Retry-After", String(retry));
+      throw errors.rateLimited(
+        "Too many integration changes. Please try again later.",
+        retry,
+      );
+    }
+    consumeRateLimit(RL_KEY, { windowMs: INTEGRATION_RL_WINDOW_MS });
+
+    const current = await activeOrgForContext(c);
+    if (!current) throw errors.notFound("No workspace found for the current user");
+    if (!canManageOrgMembers(current.role)) {
+      throw errors.forbidden(
+        "Only workspace owners and admins can manage integrations",
+      );
+    }
+
+    const orgRow = await db.query.organizations.findFirst({
+      where: eq(organizations.id, current.orgId),
+    });
+    if (!orgRow) throw errors.notFound("Workspace not found");
+
+    const disconnect = body.disconnect === true;
+    const nextSlack = disconnect
+      ? null
+      : {
+          webhookUrl: body.webhookUrl!,
+          connectedAt: new Date().toISOString(),
+        };
+
+    const nextSettings = mergeSlackIntegration(orgRow.settings, nextSlack);
+    await db.transaction(async (tx) => {
+      await tx
+        .update(organizations)
+        .set({ settings: nextSettings })
+        .where(eq(organizations.id, current.orgId));
+
+      await tx.insert(auditEvents).values({
+        orgId: current.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "workspace.integration_updated",
+        targetType: "organization",
+        targetId: current.orgId,
+        targetName: orgRow.name,
+        ipHash,
+        userAgent,
+        success: true,
+        metadata: {
+          integration: "slack",
+          connected: !disconnect,
+        },
+      });
+    });
+
+    logger.info(
+      { orgId: current.orgId, actorUserId: user.id, integration: "slack", disconnect },
+      "workspace integration updated",
+    );
+
+    return c.json({
+      integrations: buildIntegrationCatalog({
+        settings: nextSettings,
+        googleSsoConfigured: isGoogleSsoConfigured(),
+      }),
+      platform: { googleSsoConfigured: isGoogleSsoConfigured() },
+    });
+  })
+
+  // ------------------------------------------------------------------
+  // POST /workspace/integrations/slack/test — send a test message to the
+  // stored webhook. Owner + admin only; Slack must already be connected.
+  // ------------------------------------------------------------------
+  .post("/integrations/slack/test", async (c) => {
+    const user = c.get("user")!;
+    const ipHash = hashIp(getClientIp(c));
+    const userAgent = c.req.header("user-agent") ?? null;
+
+    const RL_KEY = `workspace-integration-test:${user.id}`;
+    const peek = peekRateLimit(RL_KEY, {
+      limit: INTEGRATION_RL_LIMIT,
+      windowMs: INTEGRATION_RL_WINDOW_MS,
+    });
+    if (!peek.allowed) {
+      const retry = Math.ceil(peek.resetMs / 1000);
+      c.header("Retry-After", String(retry));
+      throw errors.rateLimited(
+        "Too many integration test attempts. Please try again later.",
+        retry,
+      );
+    }
+    consumeRateLimit(RL_KEY, { windowMs: INTEGRATION_RL_WINDOW_MS });
+
+    const current = await activeOrgForContext(c);
+    if (!current) throw errors.notFound("No workspace found for the current user");
+    if (!canManageOrgMembers(current.role)) {
+      throw errors.forbidden(
+        "Only workspace owners and admins can test integrations",
+      );
+    }
+
+    const orgRow = await db.query.organizations.findFirst({
+      where: eq(organizations.id, current.orgId),
+    });
+    if (!orgRow) throw errors.notFound("Workspace not found");
+
+    const slack = readOrgSlackIntegration(orgRow.settings);
+    if (!slack) {
+      throw errors.validation("Slack is not connected for this workspace", {
+        fieldErrors: { slack: ["Connect a Slack webhook first"] },
+      });
+    }
+
+    const res = await fetch(slack.webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "Woxa Vault test notification — your Slack integration is working.",
+      }),
+    });
+
+    if (!res.ok) {
+      logger.warn(
+        { orgId: current.orgId, status: res.status },
+        "slack integration test failed",
+      );
+      throw errors.validation("Slack rejected the test message", {
+        fieldErrors: { webhookUrl: ["Check the webhook URL and channel permissions"] },
+      });
+    }
+
+    await db.insert(auditEvents).values({
+      orgId: current.orgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "workspace.integration_tested",
+      targetType: "organization",
+      targetId: current.orgId,
+      targetName: orgRow.name,
+      ipHash,
+      userAgent,
+      success: true,
+      metadata: { integration: "slack" },
+    });
+
+    return c.json({ ok: true });
   })
 
   // ------------------------------------------------------------------

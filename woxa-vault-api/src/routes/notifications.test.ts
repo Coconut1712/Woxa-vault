@@ -510,4 +510,48 @@ describe("Notifications system (integration)", () => {
     expect((await req("/notifications?limit=51", a.cookie)).status).toBe(400);
     expect((await req("/notifications?limit=30", a.cookie)).status).toBe(200);
   });
+
+  // ---- user preferences ----------------------------------------------------
+
+  it("respects user notification preferences (opt-out)", async () => {
+    const a = await makeUser("admin");
+    const b = await makeUser("member");
+    const vaultId = await makeVault(a.userId);
+    await addVaultMember(vaultId, a.userId, "manager");
+
+    // B opts out of vault sharing notifications.
+    const patch = await req("/me/notifications/settings", b.cookie, {
+      method: "PATCH",
+      body: JSON.stringify({ vaultShared: false }),
+    });
+    expect(patch.status).toBe(200);
+
+    // A shares the vault with B.
+    await req(`/vaults/${vaultId}/members`, a.cookie, {
+      method: "POST",
+      body: JSON.stringify({ userId: b.userId, role: "viewer" }),
+    });
+
+    // B should have NO notifications because they opted out.
+    const bInbox = await listNotifications(b.cookie);
+    expect(bInbox.unreadCount).toBe(0);
+    expect(bInbox.notifications.length).toBe(0);
+
+    // B opts back in.
+    await req("/me/notifications/settings", b.cookie, {
+      method: "PATCH",
+      body: JSON.stringify({ vaultShared: true }),
+    });
+
+    // A changes B's role (re-share if needed, but here we just PATCH existing).
+    await req(`/vaults/${vaultId}/members/${b.userId}`, a.cookie, {
+      method: "PATCH",
+      body: JSON.stringify({ role: "editor" }),
+    });
+
+    // B should now have the notification.
+    const bInbox2 = await listNotifications(b.cookie);
+    expect(bInbox2.unreadCount).toBe(1);
+    expect(bInbox2.notifications[0]!.type).toBe("role.changed");
+  });
 });

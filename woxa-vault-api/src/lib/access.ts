@@ -1,6 +1,14 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db/client";
-import { folderMembers, itemMembers, vaultMembers } from "@/db/schema";
+import {
+  folderMembers,
+  folderTeamMembers,
+  itemMembers,
+  itemTeamMembers,
+  teamMembers,
+  vaultMembers,
+  vaultTeamMembers,
+} from "@/db/schema";
 
 // ---------------------------------------------------------------------------
 // Granular access engine — DESIGN.md §11.3 "most specific wins".
@@ -65,33 +73,88 @@ export async function resolveItemRole(
   userId: string,
   item: { id: string; vaultId: string; folderId: string | null },
 ): Promise<Role | null> {
-  // 1. Item override (most specific).
-  const itemGrant = await db
-    .select({ role: itemMembers.role })
+  // 1. Item level (most specific).
+  const itemUserGrant = await db
+    .select({
+      role: itemMembers.role,
+      originalRole: itemMembers.originalRole,
+      expiresAt: itemMembers.expiresAt,
+    })
     .from(itemMembers)
     .where(and(eq(itemMembers.itemId, item.id), eq(itemMembers.userId, userId)))
     .limit(1);
-  if (itemGrant[0]) return itemGrant[0].role as Role;
 
-  // 2. Folder grant (only when the item lives in a folder).
+  const itemTeamGrants = await db
+    .select({
+      role: itemTeamMembers.role,
+      originalRole: itemTeamMembers.originalRole,
+      expiresAt: itemTeamMembers.expiresAt,
+    })
+    .from(itemTeamMembers)
+    .innerJoin(teamMembers, eq(teamMembers.teamId, itemTeamMembers.teamId))
+    .where(and(eq(itemTeamMembers.itemId, item.id), eq(teamMembers.userId, userId)));
+
+  const itemRole = highestRole([
+    ...itemUserGrant,
+    ...itemTeamGrants
+  ]);
+  if (itemRole) return itemRole;
+
+  // 2. Folder level
   if (item.folderId) {
-    const folderGrant = await db
-      .select({ role: folderMembers.role })
+    const folderUserGrant = await db
+      .select({
+        role: folderMembers.role,
+        originalRole: folderMembers.originalRole,
+        expiresAt: folderMembers.expiresAt,
+      })
       .from(folderMembers)
       .where(and(eq(folderMembers.folderId, item.folderId), eq(folderMembers.userId, userId)))
       .limit(1);
-    if (folderGrant[0]) return folderGrant[0].role as Role;
+
+    const folderTeamGrants = await db
+      .select({
+        role: folderTeamMembers.role,
+        originalRole: folderTeamMembers.originalRole,
+        expiresAt: folderTeamMembers.expiresAt,
+      })
+      .from(folderTeamMembers)
+      .innerJoin(teamMembers, eq(teamMembers.teamId, folderTeamMembers.teamId))
+      .where(and(eq(folderTeamMembers.folderId, item.folderId), eq(teamMembers.userId, userId)));
+
+    const folderRole = highestRole([
+      ...folderUserGrant,
+      ...folderTeamGrants
+    ]);
+    if (folderRole) return folderRole;
   }
 
-  // 3. Vault membership (least specific).
-  const vaultGrant = await db
-    .select({ role: vaultMembers.role })
+  // 3. Vault level (least specific).
+  const vaultUserGrant = await db
+    .select({
+      role: vaultMembers.role,
+      originalRole: vaultMembers.originalRole,
+      expiresAt: vaultMembers.expiresAt,
+    })
     .from(vaultMembers)
     .where(and(eq(vaultMembers.vaultId, item.vaultId), eq(vaultMembers.userId, userId)))
     .limit(1);
-  if (vaultGrant[0]) return vaultGrant[0].role as Role;
 
-  return null;
+  const vaultTeamGrants = await db
+    .select({
+      role: vaultTeamMembers.role,
+      originalRole: vaultTeamMembers.originalRole,
+      expiresAt: vaultTeamMembers.expiresAt,
+    })
+    .from(vaultTeamMembers)
+    .innerJoin(teamMembers, eq(teamMembers.teamId, vaultTeamMembers.teamId))
+    .where(and(eq(vaultTeamMembers.vaultId, item.vaultId), eq(teamMembers.userId, userId)));
+
+  const vaultRole = highestRole([
+    ...vaultUserGrant,
+    ...vaultTeamGrants
+  ]);
+  return vaultRole;
 }
 
 // Resolve the effective role for (user, folder): folder grant → vault
@@ -100,21 +163,76 @@ export async function resolveFolderRole(
   userId: string,
   folder: { id: string; vaultId: string },
 ): Promise<Role | null> {
-  const folderGrant = await db
-    .select({ role: folderMembers.role })
+  // 1. Folder level
+  const folderUserGrant = await db
+    .select({
+      role: folderMembers.role,
+      originalRole: folderMembers.originalRole,
+      expiresAt: folderMembers.expiresAt,
+    })
     .from(folderMembers)
     .where(and(eq(folderMembers.folderId, folder.id), eq(folderMembers.userId, userId)))
     .limit(1);
-  if (folderGrant[0]) return folderGrant[0].role as Role;
 
-  const vaultGrant = await db
-    .select({ role: vaultMembers.role })
+  const folderTeamGrants = await db
+    .select({
+      role: folderTeamMembers.role,
+      originalRole: folderTeamMembers.originalRole,
+      expiresAt: folderTeamMembers.expiresAt,
+    })
+    .from(folderTeamMembers)
+    .innerJoin(teamMembers, eq(teamMembers.teamId, folderTeamMembers.teamId))
+    .where(and(eq(folderTeamMembers.folderId, folder.id), eq(teamMembers.userId, userId)));
+
+  const folderRole = highestRole([
+    ...folderUserGrant,
+    ...folderTeamGrants
+  ]);
+  if (folderRole) return folderRole;
+
+  // 2. Vault level
+  const vaultUserGrant = await db
+    .select({
+      role: vaultMembers.role,
+      originalRole: vaultMembers.originalRole,
+      expiresAt: vaultMembers.expiresAt,
+    })
     .from(vaultMembers)
     .where(and(eq(vaultMembers.vaultId, folder.vaultId), eq(vaultMembers.userId, userId)))
     .limit(1);
-  if (vaultGrant[0]) return vaultGrant[0].role as Role;
 
-  return null;
+  const vaultTeamGrants = await db
+    .select({
+      role: vaultTeamMembers.role,
+      originalRole: vaultTeamMembers.originalRole,
+      expiresAt: vaultTeamMembers.expiresAt,
+    })
+    .from(vaultTeamMembers)
+    .innerJoin(teamMembers, eq(teamMembers.teamId, vaultTeamMembers.teamId))
+    .where(and(eq(vaultTeamMembers.vaultId, folder.vaultId), eq(teamMembers.userId, userId)));
+
+  const vaultRole = highestRole([
+    ...vaultUserGrant,
+    ...vaultTeamGrants
+  ]);
+  return vaultRole;
+}
+
+/** Helper to pick the highest role among multiple applicable grants. */
+function highestRole(grants: { role: string; originalRole: string | null; expiresAt: Date | null }[]): Role | null {
+  const activeRoles = grants
+    .map(g => {
+      if (g.expiresAt && g.expiresAt < new Date()) {
+        return (g.originalRole as Role) ?? null;
+      }
+      return g.role as Role;
+    })
+    .filter((r): r is Role => r !== null);
+
+  if (activeRoles.length === 0) return null;
+  return activeRoles.reduce((prev, curr) => 
+    ROLE_RANK[curr] > ROLE_RANK[prev] ? curr : prev
+  );
 }
 
 // Rank just below `viewer` (no grant). Used as the floor when a non-creator has

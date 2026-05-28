@@ -4,7 +4,7 @@ import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { createHash, randomBytes } from "node:crypto";
 import { encodeBase32LowerCaseNoPadding } from "@oslojs/encoding";
 import { db } from "@/db/client";
-import { auditEvents, invitations, organizations, orgMembers, users } from "@/db/schema";
+import { auditEvents, invitations, organizations, orgMembers, userKeys, users } from "@/db/schema";
 import { env } from "@/config/env";
 import { errors } from "@/lib/errors";
 import { hashIp } from "@/lib/ipHash";
@@ -171,19 +171,22 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
         displayName: users.displayName,
         name: users.name,
         status: users.status,
+        publicKey: userKeys.publicKey,
       })
       .from(orgMembers)
       .innerJoin(users, eq(users.id, orgMembers.userId))
+      .leftJoin(userKeys, eq(userKeys.userId, users.id))
       .where(eq(orgMembers.orgId, current.orgId))
       .orderBy(asc(orgMembers.joinedAt));
 
-    const members: OrgMemberDTO[] = rows.map((r) => ({
+    const members: (OrgMemberDTO & { publicKey: string | null })[] = rows.map((r) => ({
       userId: r.userId,
       email: r.email,
       displayName: r.displayName ?? r.name ?? r.email,
       role: r.role as OrgRole,
       joinedAt: r.joinedAt.toISOString(),
       status: r.status === "active" ? "active" : "disabled",
+      publicKey: r.publicKey ? r.publicKey.toString("base64") : null,
     }));
 
     // Pending invites are surfaced as a sibling list so the UI can render
@@ -201,6 +204,19 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
         .map(toInvitationDTO)
         .filter((i) => i.status === "pending");
     }
+
+    await db.insert(auditEvents).values({
+      orgId: current.orgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "member.list_viewed",
+      targetType: "organization",
+      targetId: current.orgId,
+      ipHash: hashIp(getClientIp(c)),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+      metadata: { memberCount: members.length, pendingInviteCount: pendingInvites.length },
+    });
 
     return c.json({ members, invitations: pendingInvites });
   })

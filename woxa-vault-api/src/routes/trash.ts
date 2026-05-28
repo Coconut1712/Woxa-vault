@@ -90,6 +90,9 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
   // List ALL soft-deleted items across every vault in the active org. Admin+
   // only; vault membership is NOT required (org-wide trash view).
   .get("/", async (c) => {
+    const user = c.get("user")!;
+    const activeOrg = await activeOrgForContext(c);
+    if (!activeOrg) throw errors.notFound("Workspace not found");
     const { orgId } = await requireTrashAdmin(c);
 
     const rows = await db
@@ -113,7 +116,7 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
       .where(and(eq(vaults.orgId, orgId), isNotNull(items.deletedAt)))
       .orderBy(desc(items.deletedAt));
 
-    const out: TrashItemDTO[] = rows.map((r) => ({
+    const dto: TrashItemDTO[] = rows.map((r) => ({
       id: r.id,
       vaultId: r.vaultId,
       vaultName: r.vaultName,
@@ -132,7 +135,20 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
       purgeAt: purgeAtFor(r.deletedAt!),
     }));
 
-    return c.json({ items: out });
+    await db.insert(auditEvents).values({
+      orgId: activeOrg.orgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "trash.log_viewed",
+      targetType: "organization",
+      targetId: activeOrg.orgId,
+      ipHash: hashIp(getClientIp(c)),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+      metadata: { itemCount: dto.length },
+    });
+
+    return c.json({ items: dto });
   })
 
   // Permanently empty the trash for the active org. MUST be declared BEFORE the
