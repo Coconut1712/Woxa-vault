@@ -11,6 +11,12 @@ const envSchema = z.object({
 
   DATABASE_URL: z.string().url(),
 
+  // Redis connection for cross-instance rate limiting (DESIGN.md §10 / NFR-012).
+  // Optional: when unset the rate limiter falls back to a per-instance in-memory
+  // sliding window, so dev/test/CI boot without a Redis dependency.
+  // Example: redis://localhost:6379
+  REDIS_URL: z.string().url().optional(),
+
   SESSION_COOKIE_NAME: z.string().default("woxa_session"),
   SESSION_COOKIE_DOMAIN: z.string().optional(),
   SESSION_COOKIE_SECURE: z

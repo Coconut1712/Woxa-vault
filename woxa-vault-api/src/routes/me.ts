@@ -574,8 +574,8 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
     const SOFT_OPTS = { limit: 30, windowMs: 15 * 60 * 1000 };
     const HARD_OPTS = { limit: 5, windowMs: 15 * 60 * 1000 };
 
-    const soft = rateLimit(SOFT_KEY, SOFT_OPTS);
-    const hardPeek = peekRateLimit(HARD_KEY, HARD_OPTS);
+    const soft = await rateLimit(SOFT_KEY, SOFT_OPTS);
+    const hardPeek = await peekRateLimit(HARD_KEY, HARD_OPTS);
     if (!soft.allowed || !hardPeek.allowed) {
       const retry = Math.ceil(Math.max(soft.resetMs, hardPeek.resetMs) / 1000);
       c.header("Retry-After", String(retry));
@@ -619,7 +619,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
     if (!storedHash) {
       // SSO JIT user with no password yet, or ZK factor missing.
       await verifyPassword(VERIFY_DUMMY_HASH, inputFactor ?? password ?? "").catch(() => false);
-      consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
+      await consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
       await auditFailure(!user.passwordHash ? "no_password" : "factor_not_available");
       throw errors.passwordNotSet(
         "Verification factor not available for this account.",
@@ -628,7 +628,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
 
     const ok = await verifyPassword(storedHash, inputFactor ?? password ?? "");
     if (!ok) {
-      consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
+      await consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
       await auditFailure("wrong_password");
       throw errors.invalidCredentials("Password is incorrect");
     }
@@ -701,8 +701,8 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
       const SOFT_OPTS = { limit: 20, windowMs: 60 * 60 * 1000 };
       const HARD_OPTS = { limit: 3, windowMs: 60 * 60 * 1000 };
 
-      const soft = rateLimit(SOFT_KEY, SOFT_OPTS);
-      const hardPeek = peekRateLimit(HARD_KEY, HARD_OPTS);
+      const soft = await rateLimit(SOFT_KEY, SOFT_OPTS);
+      const hardPeek = await peekRateLimit(HARD_KEY, HARD_OPTS);
       if (!soft.allowed || !hardPeek.allowed) {
         const retry = Math.ceil(Math.max(soft.resetMs, hardPeek.resetMs) / 1000);
         c.header("Retry-After", String(retry));
@@ -730,7 +730,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
           // verifies never increment the failure bucket so a legit user
           // rotating their kit multiple times in a session does not lock
           // themselves out.
-          consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
+          await consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
 
           await tx.insert(auditEvents).values({
             actorUserId: user.id,
@@ -863,7 +863,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
 
       const RL_KEY = `me-sessions-revoke-all:${user.id}`;
       const RL_OPTS = { limit: 3, windowMs: 60 * 60 * 1000 };
-      const peek = peekRateLimit(RL_KEY, RL_OPTS);
+      const peek = await peekRateLimit(RL_KEY, RL_OPTS);
       if (!peek.allowed) {
         const retry = Math.ceil(peek.resetMs / 1000);
         c.header("Retry-After", String(retry));
@@ -884,7 +884,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
 
       const ok = await verifyPassword(user.passwordHash, password);
       if (!ok) {
-        consumeRateLimit(RL_KEY, { windowMs: RL_OPTS.windowMs });
+        await consumeRateLimit(RL_KEY, { windowMs: RL_OPTS.windowMs });
         await db.insert(auditEvents).values({
           actorUserId: user.id,
           actorEmail: user.email,

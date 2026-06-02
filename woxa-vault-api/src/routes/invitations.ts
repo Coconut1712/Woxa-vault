@@ -167,7 +167,7 @@ export const invitationRoutes = new Hono<{ Variables: AuthVariables }>()
     // including success, which is fine because legitimate users only ever
     // hit this endpoint once per invitation.
     const ip = getClientIp(c);
-    const acceptLimit = rateLimit(`invite-accept:${ip}:${tokenHash}`, {
+    const acceptLimit = await rateLimit(`invite-accept:${ip}:${tokenHash}`, {
       limit: 10,
       windowMs: 60 * 1000,
     });
@@ -360,7 +360,7 @@ export const invitationRoutes = new Hono<{ Variables: AuthVariables }>()
       // Rate limit per (IP, token) to defeat password-stuffing across many
       // accounts using the same token, and per IP to bound brute-force.
       const ip = getClientIp(c);
-      const limitByIpToken = rateLimit(`invite-signup:${ip}:${tokenHash}`, {
+      const limitByIpToken = await rateLimit(`invite-signup:${ip}:${tokenHash}`, {
         limit: 5,
         windowMs: 60 * 1000,
       });

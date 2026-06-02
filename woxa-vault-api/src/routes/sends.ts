@@ -188,7 +188,7 @@ export const sendRoutes = new Hono<{ Variables: AuthVariables }>()
     const body = c.req.valid("json");
 
     // Rate limit (per-user): 10 / minute.
-    const rl = rateLimit(`sends:create:${user.id}`, { limit: 10, windowMs: 60_000 });
+    const rl = await rateLimit(`sends:create:${user.id}`, { limit: 10, windowMs: 60_000 });
     if (!rl.allowed) {
       c.header("Retry-After", String(Math.ceil(rl.resetMs / 1000)));
       throw errors.rateLimited("Too many sends, slow down", Math.ceil(rl.resetMs / 1000));
@@ -340,7 +340,7 @@ export const publicSendRoutes = new Hono<{ Variables: AuthVariables }>()
 
     // Anti-brute-force: 10/min per (IP, token).
     const ip = getClientIp(c);
-    const rl = rateLimit(`sends:reveal:${ip}:${token}`, { limit: 10, windowMs: 60_000 });
+    const rl = await rateLimit(`sends:reveal:${ip}:${token}`, { limit: 10, windowMs: 60_000 });
     if (!rl.allowed) {
       c.header("Retry-After", String(Math.ceil(rl.resetMs / 1000)));
       throw errors.rateLimited("Too many reveal attempts", Math.ceil(rl.resetMs / 1000));

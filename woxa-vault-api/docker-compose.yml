@@ -26,6 +26,21 @@ services:
       timeout: 5s
       retries: 10
 
+  # Redis 7 — shared sliding-window rate-limit state across API instances
+  # (DESIGN.md §10 / NFR-012). Optional in dev: if you don't run this service,
+  # leave REDIS_URL unset and the API falls back to in-memory rate limiting.
+  redis:
+    image: redis:7-alpine
+    container_name: woxa-vault-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   postgres_data:
     name: woxa-vault-postgres-data

@@ -54,7 +54,7 @@ export const accessRequestRoutes = new Hono<{ Variables: AuthVariables }>()
 
     const input = c.req.valid("json");
 
-    const limitRes = rateLimit(`access-request:create:${user.id}`, {
+    const limitRes = await rateLimit(`access-request:create:${user.id}`, {
       limit: 10,
       windowMs: 60 * 60 * 1000, // 10 per hour
     });

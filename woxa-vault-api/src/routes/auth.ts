@@ -93,8 +93,8 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
     const ipHash = hashIp(ip);
 
     // Rate limit both by IP and by IP+email to defeat email-enum + brute force.
-    const ipLimit = rateLimit(`login:ip:${ip}`, { limit: LOGIN_LIMIT, windowMs: LOGIN_WINDOW_MS });
-    const comboLimit = rateLimit(`login:${ip}:${email}`, {
+    const ipLimit = await rateLimit(`login:ip:${ip}`, { limit: LOGIN_LIMIT, windowMs: LOGIN_WINDOW_MS });
+    const comboLimit = await rateLimit(`login:${ip}:${email}`, {
       limit: LOGIN_LIMIT,
       windowMs: LOGIN_WINDOW_MS,
     });
@@ -277,7 +277,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
     const ipHash = hashIp(ip);
     const userAgent = c.req.header("user-agent") ?? null;
 
-    const limit = rateLimit(`register:ip:${ip}`, {
+    const limit = await rateLimit(`register:ip:${ip}`, {
       limit: REGISTER_LIMIT,
       windowMs: REGISTER_WINDOW_MS,
     });
@@ -446,11 +446,11 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
       // both IP and email so an attacker can't pivot across emails from the
       // same IP, and can't hammer one email from many IPs without burning
       // the per-email window.
-      const ipLimit = rateLimit(`pwreset:ip:${ip}`, {
+      const ipLimit = await rateLimit(`pwreset:ip:${ip}`, {
         limit: 5,
         windowMs: 60 * 60 * 1000,
       });
-      const emailLimit = rateLimit(`pwreset:email:${email}`, {
+      const emailLimit = await rateLimit(`pwreset:email:${email}`, {
         limit: 3,
         windowMs: 60 * 60 * 1000,
       });

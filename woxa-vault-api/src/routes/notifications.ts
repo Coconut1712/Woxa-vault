@@ -95,7 +95,7 @@ export const notificationRoutes = new Hono<{ Variables: AuthVariables }>()
     const user = c.get("user")!;
     const limit = c.req.valid("query").limit ?? 30;
 
-    const limitRes = rateLimit(`notifications:list:${user.id}`, {
+    const limitRes = await rateLimit(`notifications:list:${user.id}`, {
       limit: 60,
       windowMs: 60 * 1000,
     });
@@ -132,7 +132,7 @@ export const notificationRoutes = new Hono<{ Variables: AuthVariables }>()
   .get("/unread-count", async (c) => {
     const user = c.get("user")!;
 
-    const limitRes = rateLimit(`notifications:unread-count:${user.id}`, {
+    const limitRes = await rateLimit(`notifications:unread-count:${user.id}`, {
       limit: 60,
       windowMs: 60 * 1000,
     });
@@ -153,7 +153,7 @@ export const notificationRoutes = new Hono<{ Variables: AuthVariables }>()
   .post("/read-all", async (c) => {
     const user = c.get("user")!;
 
-    const limitRes = rateLimit(`notifications:read-all:${user.id}`, {
+    const limitRes = await rateLimit(`notifications:read-all:${user.id}`, {
       limit: 20,
       windowMs: 60 * 1000,
     });
@@ -190,7 +190,7 @@ export const notificationRoutes = new Hono<{ Variables: AuthVariables }>()
     const user = c.get("user")!;
     const { id } = c.req.valid("param");
 
-    const limitRes = rateLimit(`notifications:read-one:${user.id}`, {
+    const limitRes = await rateLimit(`notifications:read-one:${user.id}`, {
       limit: 60,
       windowMs: 60 * 1000,
     });

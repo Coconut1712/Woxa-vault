@@ -131,7 +131,7 @@ export const ssoRoutes = new Hono<{ Variables: AuthVariables }>()
     // Per-IP rate limit so an automated attacker can't spam the start URL
     // and exhaust outbound Google quota.
     const ip = getClientIp(c);
-    const limit = rateLimit(`sso:start:${ip}`, {
+    const limit = await rateLimit(`sso:start:${ip}`, {
       limit: SSO_RATE_LIMIT_LIMIT,
       windowMs: SSO_RATE_LIMIT_WINDOW_MS,
     });

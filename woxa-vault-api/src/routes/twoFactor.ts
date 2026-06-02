@@ -177,7 +177,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
 
     // Rate limit enroll to defeat a session-thief who tries to spam fresh
     // secrets to confuse the user (each enroll rotates the pending secret).
-    const rl = rateLimit(`2fa-enroll:${user.id}`, { limit: 5, windowMs: 60 * 1000 });
+    const rl = await rateLimit(`2fa-enroll:${user.id}`, { limit: 5, windowMs: 60 * 1000 });
     if (!rl.allowed) {
       const retry = Math.ceil(rl.resetMs / 1000);
       c.header("Retry-After", String(retry));
@@ -240,8 +240,8 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
     const HARD = `2fa-verify-enroll-fail:${user.id}`;
     const SOFT_OPTS = { limit: 30, windowMs: 60 * 1000 };
     const HARD_OPTS = { limit: 10, windowMs: 60 * 1000 };
-    const soft = rateLimit(SOFT, SOFT_OPTS);
-    const peek = peekRateLimit(HARD, HARD_OPTS);
+    const soft = await rateLimit(SOFT, SOFT_OPTS);
+    const peek = await peekRateLimit(HARD, HARD_OPTS);
     if (!soft.allowed || !peek.allowed) {
       const retry = Math.ceil(Math.max(soft.resetMs, peek.resetMs) / 1000);
       c.header("Retry-After", String(retry));
@@ -261,7 +261,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
     // — no enrollment, no enable, fail bucket charged, audit row written.
     const totpResult = await consumeTotpStep(db, user.id, secret, code);
     if (totpResult !== "ok") {
-      consumeRateLimit(HARD, { windowMs: HARD_OPTS.windowMs });
+      await consumeRateLimit(HARD, { windowMs: HARD_OPTS.windowMs });
       await db.insert(auditEvents).values({
         actorUserId: user.id,
         actorEmail: user.email,
@@ -332,7 +332,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
     // their password correctly never charges the bucket.
     const DISABLE_FAIL_KEY = `2fa-disable-fail:${user.id}`;
     const DISABLE_FAIL_OPTS = { limit: 10, windowMs: 15 * 60 * 1000 };
-    const disablePeek = peekRateLimit(DISABLE_FAIL_KEY, DISABLE_FAIL_OPTS);
+    const disablePeek = await peekRateLimit(DISABLE_FAIL_KEY, DISABLE_FAIL_OPTS);
     if (!disablePeek.allowed) {
       const retry = Math.ceil(disablePeek.resetMs / 1000);
       c.header("Retry-After", String(retry));
@@ -344,7 +344,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
     }
     const passwordOk = await verifyPassword(user.passwordHash, password);
     if (!passwordOk) {
-      consumeRateLimit(DISABLE_FAIL_KEY, { windowMs: DISABLE_FAIL_OPTS.windowMs });
+      await consumeRateLimit(DISABLE_FAIL_KEY, { windowMs: DISABLE_FAIL_OPTS.windowMs });
       await db.insert(auditEvents).values({
         actorUserId: user.id,
         actorEmail: user.email,
@@ -402,7 +402,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         }
       }
       if (!factorOk) {
-        consumeRateLimit(DISABLE_FAIL_KEY, { windowMs: DISABLE_FAIL_OPTS.windowMs });
+        await consumeRateLimit(DISABLE_FAIL_KEY, { windowMs: DISABLE_FAIL_OPTS.windowMs });
         await db.insert(auditEvents).values({
           actorUserId: user.id,
           actorEmail: user.email,
@@ -474,7 +474,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
     // TOTP code. Bucket ticks only on a verified fail below.
     const REGEN_FAIL_KEY = `2fa-regen-fail:${user.id}`;
     const REGEN_FAIL_OPTS = { limit: 5, windowMs: 15 * 60 * 1000 };
-    const regenPeek = peekRateLimit(REGEN_FAIL_KEY, REGEN_FAIL_OPTS);
+    const regenPeek = await peekRateLimit(REGEN_FAIL_KEY, REGEN_FAIL_OPTS);
     if (!regenPeek.allowed) {
       const retry = Math.ceil(regenPeek.resetMs / 1000);
       c.header("Retry-After", String(retry));
@@ -492,7 +492,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
       // F-08: emit an audit row so brute-force attempts at this endpoint
       // leave the same trail as /disable. Mirrors the disable_password
       // stage for downstream alerting heuristics.
-      consumeRateLimit(REGEN_FAIL_KEY, { windowMs: REGEN_FAIL_OPTS.windowMs });
+      await consumeRateLimit(REGEN_FAIL_KEY, { windowMs: REGEN_FAIL_OPTS.windowMs });
       await db.insert(auditEvents).values({
         actorUserId: user.id,
         actorEmail: user.email,
@@ -513,7 +513,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
     // step so a replayed code can't trigger a backup-code rotation either.
     const regenTotp = await consumeTotpStep(db, user.id, secret, code);
     if (regenTotp !== "ok") {
-      consumeRateLimit(REGEN_FAIL_KEY, { windowMs: REGEN_FAIL_OPTS.windowMs });
+      await consumeRateLimit(REGEN_FAIL_KEY, { windowMs: REGEN_FAIL_OPTS.windowMs });
       await db.insert(auditEvents).values({
         actorUserId: user.id,
         actorEmail: user.email,
@@ -580,7 +580,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
     // a real client only hits this route a handful of times per login.
     const IP_KEY = `2fa-verify-login-ip:${ip}`;
     const IP_OPTS = { limit: 30, windowMs: 60 * 1000 };
-    const ipRl = rateLimit(IP_KEY, IP_OPTS);
+    const ipRl = await rateLimit(IP_KEY, IP_OPTS);
     if (!ipRl.allowed) {
       const retry = Math.ceil(ipRl.resetMs / 1000);
       c.header("Retry-After", String(retry));
@@ -628,7 +628,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
     // (credential stuffing post-password-stage) still gets shut down.
     const RL_KEY = `2fa-verify-login:${ip}:${userId}`;
     const RL_OPTS = { limit: 10, windowMs: 60 * 1000 };
-    const rl = rateLimit(RL_KEY, RL_OPTS);
+    const rl = await rateLimit(RL_KEY, RL_OPTS);
     if (!rl.allowed) {
       const retry = Math.ceil(rl.resetMs / 1000);
       c.header("Retry-After", String(retry));

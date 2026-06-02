@@ -488,8 +488,8 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
     const SOFT_OPTS = { limit: DELETE_SOFT_LIMIT, windowMs: DELETE_RL_WINDOW_MS };
     const HARD_OPTS = { limit: DELETE_HARD_LIMIT, windowMs: DELETE_RL_WINDOW_MS };
 
-    const soft = rateLimit(SOFT_KEY, SOFT_OPTS);
-    const hardPeek = peekRateLimit(HARD_KEY, HARD_OPTS);
+    const soft = await rateLimit(SOFT_KEY, SOFT_OPTS);
+    const hardPeek = await peekRateLimit(HARD_KEY, HARD_OPTS);
     if (!soft.allowed || !hardPeek.allowed) {
       const retry = Math.ceil(Math.max(soft.resetMs, hardPeek.resetMs) / 1000);
       c.header("Retry-After", String(retry));
@@ -517,7 +517,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
     }
     const passwordOk = await verifyPassword(user.passwordHash, password);
     if (!passwordOk) {
-      consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
+      await consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
       await db.insert(auditEvents).values({
         orgId: current.orgId,
         actorUserId: user.id,
@@ -606,7 +606,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
     const userAgent = c.req.header("user-agent") ?? null;
 
     const RL_KEY = `workspace-create:${user.id}`;
-    const peek = peekRateLimit(RL_KEY, {
+    const peek = await peekRateLimit(RL_KEY, {
       limit: CREATE_RL_LIMIT,
       windowMs: CREATE_RL_WINDOW_MS,
     });
@@ -618,7 +618,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         retry,
       );
     }
-    consumeRateLimit(RL_KEY, { windowMs: CREATE_RL_WINDOW_MS });
+    await consumeRateLimit(RL_KEY, { windowMs: CREATE_RL_WINDOW_MS });
 
     const creatorName = user.displayName ?? user.name ?? user.email.split("@")[0]!;
 
@@ -835,7 +835,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
     const userAgent = c.req.header("user-agent") ?? null;
 
     const RL_KEY = `workspace-policy:${user.id}`;
-    const peek = peekRateLimit(RL_KEY, {
+    const peek = await peekRateLimit(RL_KEY, {
       limit: POLICY_RL_LIMIT,
       windowMs: POLICY_RL_WINDOW_MS,
     });
@@ -847,7 +847,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         retry,
       );
     }
-    consumeRateLimit(RL_KEY, { windowMs: POLICY_RL_WINDOW_MS });
+    await consumeRateLimit(RL_KEY, { windowMs: POLICY_RL_WINDOW_MS });
 
     const current = await activeOrgForContext(c);
     if (!current) throw errors.notFound("No workspace found for the current user");
@@ -1014,7 +1014,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
     const userAgent = c.req.header("user-agent") ?? null;
 
     const RL_KEY = `workspace-integration:${user.id}`;
-    const peek = peekRateLimit(RL_KEY, {
+    const peek = await peekRateLimit(RL_KEY, {
       limit: INTEGRATION_RL_LIMIT,
       windowMs: INTEGRATION_RL_WINDOW_MS,
     });
@@ -1026,7 +1026,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         retry,
       );
     }
-    consumeRateLimit(RL_KEY, { windowMs: INTEGRATION_RL_WINDOW_MS });
+    await consumeRateLimit(RL_KEY, { windowMs: INTEGRATION_RL_WINDOW_MS });
 
     const current = await activeOrgForContext(c);
     if (!current) throw errors.notFound("No workspace found for the current user");
@@ -1098,7 +1098,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
     const userAgent = c.req.header("user-agent") ?? null;
 
     const RL_KEY = `workspace-integration-test:${user.id}`;
-    const peek = peekRateLimit(RL_KEY, {
+    const peek = await peekRateLimit(RL_KEY, {
       limit: INTEGRATION_RL_LIMIT,
       windowMs: INTEGRATION_RL_WINDOW_MS,
     });
@@ -1110,7 +1110,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         retry,
       );
     }
-    consumeRateLimit(RL_KEY, { windowMs: INTEGRATION_RL_WINDOW_MS });
+    await consumeRateLimit(RL_KEY, { windowMs: INTEGRATION_RL_WINDOW_MS });
 
     const current = await activeOrgForContext(c);
     if (!current) throw errors.notFound("No workspace found for the current user");
@@ -1189,8 +1189,8 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
     const SOFT_OPTS = { limit: TRANSFER_SOFT_LIMIT, windowMs: TRANSFER_RL_WINDOW_MS };
     const HARD_OPTS = { limit: TRANSFER_HARD_LIMIT, windowMs: TRANSFER_RL_WINDOW_MS };
 
-    const soft = rateLimit(SOFT_KEY, SOFT_OPTS);
-    const hardPeek = peekRateLimit(HARD_KEY, HARD_OPTS);
+    const soft = await rateLimit(SOFT_KEY, SOFT_OPTS);
+    const hardPeek = await peekRateLimit(HARD_KEY, HARD_OPTS);
     if (!soft.allowed || !hardPeek.allowed) {
       const retry = Math.ceil(Math.max(soft.resetMs, hardPeek.resetMs) / 1000);
       c.header("Retry-After", String(retry));
@@ -1218,7 +1218,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
     const passwordOk = await verifyPassword(user.passwordHash, password);
     if (!passwordOk) {
       // Charge the hard quota only on failure (constant w.r.t. the legit user).
-      consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
+      await consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
       await db.insert(auditEvents).values({
         orgId: current.orgId,
         actorUserId: user.id,
@@ -1349,7 +1349,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
     const userAgent = c.req.header("user-agent") ?? null;
 
     const RL_KEY = `workspace-switch:${user.id}`;
-    const rl = rateLimit(RL_KEY, { limit: SWITCH_RL_LIMIT, windowMs: SWITCH_RL_WINDOW_MS });
+    const rl = await rateLimit(RL_KEY, { limit: SWITCH_RL_LIMIT, windowMs: SWITCH_RL_WINDOW_MS });
     if (!rl.allowed) {
       const retry = Math.ceil(rl.resetMs / 1000);
       c.header("Retry-After", String(retry));
