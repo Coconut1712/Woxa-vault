@@ -31,9 +31,20 @@ describe("lib/mailer/resend", () => {
   });
 
   it("falls back to console.log when RESEND_API_KEY is not configured", async () => {
-    // Force dev fallback. The mailer module caches its client lazily, so we
-    // ensure RESEND_API_KEY is empty BEFORE importing.
-    delete process.env.RESEND_API_KEY;
+    // Force dev fallback. The mailer reads `env.RESEND_API_KEY` (parsed once at
+    // config import time from .env), NOT process.env directly — so deleting the
+    // process.env var has no effect when a developer has a real key in .env.
+    // We mock the config module so the mailer sees an empty key and takes the
+    // `getClient() === null` dev-fallback branch deterministically. We also
+    // reset the module registry so the mailer's lazily-cached Resend client
+    // (which may have been populated by an earlier import with a live key) is
+    // rebuilt against the mocked env.
+    vi.resetModules();
+    const real = await vi.importActual<typeof import("@/config/env")>("@/config/env");
+    vi.doMock("@/config/env", () => ({
+      ...real,
+      env: { ...real.env, RESEND_API_KEY: undefined },
+    }));
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { sendInviteEmail } = await import("./resend");
     const result = await sendInviteEmail({
@@ -53,5 +64,7 @@ describe("lib/mailer/resend", () => {
     const calls = logSpy.mock.calls.map((args) => args.join(" "));
     expect(calls.some((line) => line.includes("Subject: Alice"))).toBe(true);
     logSpy.mockRestore();
+    vi.doUnmock("@/config/env");
+    vi.resetModules();
   });
 });

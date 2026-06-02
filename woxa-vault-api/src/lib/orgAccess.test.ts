@@ -75,7 +75,7 @@ describe("assignable roles (PATCH role / invite surface)", () => {
     expect(ASSIGNABLE_ORG_ROLES).not.toContain("owner");
   });
 
-  it("covers exactly admin/member/guest", () => {
-    expect([...ASSIGNABLE_ORG_ROLES].sort()).toEqual(["admin", "guest", "member"]);
+  it("covers exactly admin/auditor/member/guest", () => {
+    expect([...ASSIGNABLE_ORG_ROLES].sort()).toEqual(["admin", "auditor", "guest", "member"]);
   });
 });

@@ -228,11 +228,11 @@ async function buildUserPayload(
     workspaceCount: memberships.length,
     hasWorkspace: memberships.length > 0,
     requiresTwoFactorEnroll,
-    isZeroKnowledge: row.authKeyHash !== null,
+    isZeroKnowledge: row.authKeyHash !== null || row.masterAuthKeyHash !== null,
     publicKey,
     // requiresPasswordSetup gates the "Set a master password" affordance for
-    // SSO JIT users on the frontend. True iff the row has no hash yet.
-    requiresPasswordSetup: row.passwordHash === null,
+    // SSO JIT users on the frontend. True iff the row has no master hash/key.
+    requiresPasswordSetup: row.passwordHash === null && row.masterAuthKeyHash === null,
     hasRecoveryKit: row.recoveryKitHash !== null,
     recoveryKitCreatedAt: row.recoveryKitCreatedAt
       ? row.recoveryKitCreatedAt.toISOString()
@@ -359,7 +359,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
   .post("/password/setup", jsonValidator(passwordSetupSchema), async (c) => {
     const user = c.get("user")!;
     const body = c.req.valid("json");
-    const { password, authKeyHash, publicKey, encryptedPrivateKey, privateKeyIv, privateKeyAuthTag } = body;
+    const { password, publicKey, encryptedPrivateKey, privateKeyIv, privateKeyAuthTag } = body;
     const ip = getClientIp(c);
     const ipHash = hashIp(ip);
     const userAgent = c.req.header("user-agent") ?? null;
