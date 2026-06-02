@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { db } from "@/db/client";
 import {
   folderMembers,
@@ -171,6 +171,113 @@ export async function resolveItemRole(
   }
 
   return null;
+}
+
+// BATCH variant of resolveItemRole — same most-specific-wins semantics (item
+// override → folder grant → vault membership → org auditor), same temp-grant
+// expiry handling via `highestRole`, but resolves MANY items in a BOUNDED
+// number of queries instead of up-to-7-per-item. Built for GET /search, which
+// must resolve up to 100 candidates per keystroke; the per-row sequential path
+// turned that into a few hundred sequential round-trips (authenticated DoS).
+//
+// Query budget (independent of candidate count):
+//   1 team-membership lookup for the caller, then for each of the three levels
+//   (item / folder / vault) one user-grant query + one team-grant query scoped
+//   to the candidate id sets → ~7 queries total. In-memory most-specific-wins
+//   per item keeps RBAC semantics byte-identical to resolveItemRole.
+//
+// Returns a Map keyed by item.id; absent key OR null value = no access (caller
+// must omit the item — anti-enumeration). Org-auditor fallback is NOT applied
+// here: callers that grant org-wide auditor read (e.g. search) short-circuit
+// that case before calling this (mirrors resolveItemRole step 4, which the
+// search route handles via its `orgRole === 'auditor'` branch).
+export async function resolveItemRolesBatch(
+  userId: string,
+  itemsToResolve: { id: string; vaultId: string; folderId: string | null }[],
+): Promise<Map<string, Role | null>> {
+  const result = new Map<string, Role | null>();
+  if (itemsToResolve.length === 0) return result;
+
+  const itemIds = [...new Set(itemsToResolve.map((i) => i.id))];
+  const folderIds = [...new Set(itemsToResolve.map((i) => i.folderId).filter((f): f is string => f !== null))];
+  const vaultIds = [...new Set(itemsToResolve.map((i) => i.vaultId))];
+
+  // The caller's team ids (one query). Empty → skip every team-grant query.
+  const teamRows = await db
+    .select({ teamId: teamMembers.teamId })
+    .from(teamMembers)
+    .where(eq(teamMembers.userId, userId));
+  const teamIds = teamRows.map((t) => t.teamId);
+
+  type Grant = { role: string; originalRole: string | null; expiresAt: Date | null };
+
+  // --- Item level -----------------------------------------------------------
+  const itemUserRows = await db
+    .select({ key: itemMembers.itemId, role: itemMembers.role, originalRole: itemMembers.originalRole, expiresAt: itemMembers.expiresAt })
+    .from(itemMembers)
+    .where(and(eq(itemMembers.userId, userId), inArray(itemMembers.itemId, itemIds)));
+  const itemTeamRows = teamIds.length
+    ? await db
+        .select({ key: itemTeamMembers.itemId, role: itemTeamMembers.role, originalRole: itemTeamMembers.originalRole, expiresAt: itemTeamMembers.expiresAt })
+        .from(itemTeamMembers)
+        .where(and(inArray(itemTeamMembers.teamId, teamIds), inArray(itemTeamMembers.itemId, itemIds)))
+    : [];
+
+  // --- Folder level ---------------------------------------------------------
+  const folderUserRows = folderIds.length
+    ? await db
+        .select({ key: folderMembers.folderId, role: folderMembers.role, originalRole: folderMembers.originalRole, expiresAt: folderMembers.expiresAt })
+        .from(folderMembers)
+        .where(and(eq(folderMembers.userId, userId), inArray(folderMembers.folderId, folderIds)))
+    : [];
+  const folderTeamRows = folderIds.length && teamIds.length
+    ? await db
+        .select({ key: folderTeamMembers.folderId, role: folderTeamMembers.role, originalRole: folderTeamMembers.originalRole, expiresAt: folderTeamMembers.expiresAt })
+        .from(folderTeamMembers)
+        .where(and(inArray(folderTeamMembers.teamId, teamIds), inArray(folderTeamMembers.folderId, folderIds)))
+    : [];
+
+  // --- Vault level ----------------------------------------------------------
+  const vaultUserRows = await db
+    .select({ key: vaultMembers.vaultId, role: vaultMembers.role, originalRole: vaultMembers.originalRole, expiresAt: vaultMembers.expiresAt })
+    .from(vaultMembers)
+    .where(and(eq(vaultMembers.userId, userId), inArray(vaultMembers.vaultId, vaultIds)));
+  const vaultTeamRows = teamIds.length
+    ? await db
+        .select({ key: vaultTeamMembers.vaultId, role: vaultTeamMembers.role, originalRole: vaultTeamMembers.originalRole, expiresAt: vaultTeamMembers.expiresAt })
+        .from(vaultTeamMembers)
+        .where(and(inArray(vaultTeamMembers.teamId, teamIds), inArray(vaultTeamMembers.vaultId, vaultIds)))
+    : [];
+
+  // Bucket every grant by its resource key so per-item resolution is O(1).
+  const bucket = (rows: { key: string; role: string; originalRole: string | null; expiresAt: Date | null }[]) => {
+    const m = new Map<string, Grant[]>();
+    for (const r of rows) {
+      const arr = m.get(r.key);
+      if (arr) arr.push(r);
+      else m.set(r.key, [r]);
+    }
+    return m;
+  };
+  const itemGrants = bucket([...itemUserRows, ...itemTeamRows]);
+  const folderGrants = bucket([...folderUserRows, ...folderTeamRows]);
+  const vaultGrants = bucket([...vaultUserRows, ...vaultTeamRows]);
+
+  for (const it of itemsToResolve) {
+    // Most-specific-wins: item override → folder grant → vault membership.
+    const itemRole = highestRole(itemGrants.get(it.id) ?? []);
+    if (itemRole) { result.set(it.id, itemRole); continue; }
+
+    if (it.folderId) {
+      const folderRole = highestRole(folderGrants.get(it.folderId) ?? []);
+      if (folderRole) { result.set(it.id, folderRole); continue; }
+    }
+
+    const vaultRole = highestRole(vaultGrants.get(it.vaultId) ?? []);
+    result.set(it.id, vaultRole); // null when no grant at any level
+  }
+
+  return result;
 }
 
 // Resolve the effective role for (user, folder): folder grant → vault

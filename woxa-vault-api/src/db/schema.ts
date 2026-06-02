@@ -397,11 +397,17 @@ export const items = pgTable(
     vaultId: uuid("vault_id")
       .notNull()
       .references(() => vaults.id, { onDelete: "cascade" }),
-    // login | note in round 2 (api_key | ssh | card | identity reserved).
+    // US-012 / FR-030: one of login | note | api_key | ssh | card | identity.
+    // Plaintext label (drives UI form/icon) — NOT a secret. Stored as text (no
+    // PG enum/check) so adding kinds needs no column migration; the closed
+    // vocabulary is enforced by the Zod `typeSchema` in routes/items.ts.
     type: text("type").notNull(),
     name: text("name").notNull(),
 
     // Non-sensitive metadata kept in plaintext for list views + search.
+    // Searched by GET /search (US-017): name, username, url, type. NEVER the
+    // ciphertext columns or anything inside the encrypted notes meta blob
+    // (tags/totp/card/etc.) — those are secret-equivalent in Phase A.
     username: text("username"),
     url: text("url"),
 
@@ -419,6 +425,12 @@ export const items = pgTable(
     // Optional folder assignment. SET NULL on folder delete (DESIGN.md §7.3).
     folderId: uuid("folder_id").references(() => folders.id, { onDelete: "set null" }),
 
+    // US-015 AC-015.3 / FR-039: timestamp of the LAST password change. Set on
+    // create (when a password is present) and on any PATCH that changes the
+    // password. NULL = item never had a password (e.g. note). Drives the
+    // frontend "password last changed X ago" display + rotation policy (FR-039).
+    passwordChangedAt: timestamp("password_changed_at", { withTimezone: true }),
+
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -433,6 +445,22 @@ export const items = pgTable(
     vaultIdx: index("items_vault_idx").on(t.vaultId),
     updatedIdx: index("items_updated_idx").on(t.vaultId, t.updatedAt),
     folderIdx: index("items_folder_idx").on(t.folderId),
+    // US-017 (AC-017.2/.5 / FR-041): trigram GIN indexes back the fuzzy
+    // `ILIKE '%q%'` search over PLAINTEXT metadata in GET /search. Requires the
+    // pg_trgm extension (created by the search migration). Only name/username/
+    // url are indexed — never ciphertext or the encrypted notes meta blob.
+    nameTrgmIdx: index("items_name_trgm_idx").using(
+      "gin",
+      sql`${t.name} gin_trgm_ops`,
+    ),
+    usernameTrgmIdx: index("items_username_trgm_idx").using(
+      "gin",
+      sql`${t.username} gin_trgm_ops`,
+    ),
+    urlTrgmIdx: index("items_url_trgm_idx").using(
+      "gin",
+      sql`${t.url} gin_trgm_ops`,
+    ),
   }),
 );
 
@@ -708,17 +736,58 @@ export const vaultKeys = pgTable(
   })
 );
 
-// Item Versions: stores encrypted item history.
+// Item Versions: a self-contained snapshot of an item's state taken BEFORE each
+// content edit (US-015 AC-015.2 / FR-037 "last 10 versions"). Each row carries
+// its OWN wrapped DEK (dek_ciphertext/dek_iv) so a version can be decrypted on
+// its own even after the live item's DEK has rotated — the snapshot does not
+// depend on the current items row for key material.
+//
+// Phase A (encryptionVersion=1): password/notes ciphertext + IVs are the
+// server-side envelope, and dek_ciphertext/dek_iv are the LOCAL_KEK-wrapped DEK.
+// Phase C ZK (encryptionVersion=2): the ciphertexts are client blobs and the
+// DEK columns are NULL (the client holds the key hierarchy).
+//
+// NOTE: encrypted_data/iv/auth_tag are LEGACY columns from migration 0021 (an
+// opaque single-blob design that was never written by any code path). They were
+// made nullable in the follow-up migration and are intentionally left unused —
+// the per-field columns below are the source of truth.
 export const itemVersions = pgTable(
   "item_versions",
   {
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
     itemId: uuid("item_id").notNull().references(() => items.id, { onDelete: "cascade" }),
     versionNumber: integer("version_number").notNull(),
-    encryptedData: bytea("encrypted_data").notNull(),
-    iv: bytea("iv").notNull(),
-    authTag: bytea("auth_tag").notNull(),
+
+    // Legacy (0021) — unused, nullable. Do not write.
+    encryptedData: bytea("encrypted_data"),
+    iv: bytea("iv"),
+    authTag: bytea("auth_tag"),
+
+    // Plaintext metadata snapshot (mirrors items.* — never secret).
+    type: text("type").notNull(),
+    name: text("name").notNull(),
+    username: text("username"),
+    url: text("url"),
+
+    // Encrypted field snapshot (mirrors items.* envelope columns).
+    passwordCiphertext: bytea("password_ciphertext"),
+    passwordIv: bytea("password_iv"),
+    notesCiphertext: bytea("notes_ciphertext"),
+    notesIv: bytea("notes_iv"),
+
+    // Snapshot of the wrapped DEK so the version decrypts self-contained
+    // (Phase A). NULL in ZK mode (encryptionVersion=2).
+    dekCiphertext: bytea("dek_ciphertext"),
+    dekIv: bytea("dek_iv"),
+
+    // Which envelope generation this snapshot used (1 = Phase A server-side,
+    // 2 = ZK client blobs). Drives how the reveal endpoint decrypts.
+    encryptionVersion: integer("encryption_version").notNull().default(1),
+
+    // Who made the edit that produced this snapshot (the editor of the NEW
+    // state). Email denormalized so the history survives user deletion.
     modifiedBy: uuid("modified_by").references(() => users.id, { onDelete: "set null" }),
+    modifiedByEmail: text("modified_by_email"),
     modifiedAt: timestamp("modified_at", { withTimezone: true }).notNull().defaultNow(),
     changeSummary: text("change_summary"),
   },

@@ -377,7 +377,12 @@ Items live inside a single vault. Authorization mirrors the vault matrix above.
 ### Canonical shapes
 
 ```ts
-type ItemType = "login" | "note";   // api_key | ssh | card | identity reserved
+// US-012 / FR-030 — six kinds are now first-class on the wire (the frontend no
+// longer collapses them to login|note). `type` is PLAINTEXT metadata: a label
+// that drives which form/icon the UI renders, NOT a secret. The closed
+// vocabulary is enforced by Zod; note the ssh kind is `ssh` (NOT `ssh_key`),
+// matching woxa-vault-web `DisplayKind`.
+type ItemType = "login" | "note" | "api_key" | "ssh" | "card" | "identity";
 
 interface ItemSummary {
   id: string;                       // bare UUID
@@ -402,12 +407,43 @@ interface ItemSummary {
 // AES-GCM ciphertext lives in dedicated bytea columns server-side; the
 // inline shape on the wire keeps the TypeScript types flat for the UI.
 interface ItemFull extends ItemSummary {
-  password: string | null;          // decrypted; null when hasPassword=false
-  notes: string | null;             // decrypted; null when hasNotes=false
-  totpSecret: null;                 // reserved
-  customFields: [];                 // reserved
+  password: string | null;          // decrypted; null when hasPassword=false OR caller lacks reveal
+  notes: string | null;             // decrypted; null when hasNotes=false OR caller lacks reveal
+  totpSecret: null;                 // see "Where each kind's secrets live" below
+  customFields: [];                 // see below
 }
 ```
+
+#### Where each kind's secrets live (SECURITY — US-012 / FR-030)
+
+The server stores NO new per-kind columns. Every kind reuses the existing
+envelope-encrypted columns, so all secret material is AES-256-GCM encrypted at
+rest under the per-item DEK (DEK wrapped by the local KEK; KMS in Phase B). The
+client is responsible for placing each field in the right wire slot:
+
+| Kind | Plaintext metadata (searchable) | Encrypted (password ciphertext) | Encrypted (notes ciphertext / `__WOXA_META__` blob) |
+|---|---|---|---|
+| `login` | name, username, url | password | totp, tags, custom fields, free-text notes |
+| `note` | name | — | note body, tags, custom fields |
+| `api_key` | name, username (key id/label) | the API key value | tags, custom fields, notes |
+| `ssh` | name | the private key | passphrase, public key, tags, custom fields, notes |
+| `card` | name | (optional) | card number, CVV, cardholder, expiry, custom fields, notes |
+| `identity` | name | — | full name, email, phone, address, custom fields, notes |
+
+- **Primary secret → `password`**: `login` password, `api_key` value, `ssh`
+  private key. Revealed only via `GET /items/:id/password` (audits `item.reveal`).
+- **Everything else → encrypted `notes`**: the client packs `totpSecret`,
+  `customFields` (each with `type: "text" | "secret"`), and the kind-specific
+  objects (`card`, `identity`, `ssh.passphrase`/`publicKey`) into a
+  `__WOXA_META__:{...}` header line prepended to the user's note text, then the
+  whole string is encrypted into `notesCiphertext`. The server treats it as an
+  opaque blob — it is decrypted only on `GET /items/:id` and only for callers
+  who pass the `canRevealItem` gate (an effective `viewer`/`auditor` gets
+  `notes: null`).
+- **Plaintext = `name`, `username`, `url`, `type` only.** These power list views
+  and search. NEVER put a secret in them.
+- `totpSecret`/`customFields` remain `null`/`[]` in the JSON `ItemFull` for wire
+  stability; the client reads the real values out of the decrypted notes blob.
 
 The list endpoint NEVER returns decrypted fields. Only `GET /items/:id` decrypts and audit-logs an `item.reveal` event.
 
@@ -430,11 +466,18 @@ Request:
   "notes": "rotate every 90 days"
 }
 ```
-- `type` required, one of `"login" | "note"`.
+- `type` required, one of `"login" | "note" | "api_key" | "ssh" | "card" | "identity"`.
 - `name` required, 1–120 chars.
-- `username`, `url`, `password`, `notes` all optional; server encrypts `password` and `notes` if present.
-- For `type=note`, `username` / `url` / `password` may be omitted.
-- Reserved fields (`folderId`, `tags`, `favorite`, `totpSecret`, `customFields`) are accepted on input but ignored in round 2.
+- `username`, `url`, `password`, `notes` all optional; server encrypts `password` and `notes` if present (for ANY type — no type-gating on encryption).
+- The same request body shape works for all six kinds. Map each kind's secrets per the table in "Where each kind's secrets live": route the primary secret into `password`, and pack everything else into the `__WOXA_META__` header inside `notes`. Example for a card:
+  ```json
+  {
+    "type": "card",
+    "name": "Corp Amex",
+    "notes": "__WOXA_META__:{\"displayKind\":\"card\",\"card\":{\"cardNumber\":\"4242...\",\"cvv\":\"999\"}}"
+  }
+  ```
+- `folderId` is honored (must belong to the same vault). `tags`, `favorite`, `totpSecret`, `customFields` are accepted but ignored as top-level inputs — they live inside the encrypted notes blob.
 Response 201:
 ```json
 { "item": ItemSummary }
@@ -450,8 +493,9 @@ Decrypts `password` and `notes` server-side and returns them inline.
 Audit event `item.reveal` is recorded with `target_id` = item id.
 
 ### `PATCH /items/:id`
-Request: any subset of `{ "name", "username", "url", "password", "notes" }`.
-- Sending `"password": null` or `"notes": null` clears the field.
+Request: any subset of `{ "type", "name", "username", "url", "password", "notes", "folderId" }`.
+- `type` (optional) converts the item between the six kinds (plaintext label only — the client re-encodes the notes meta blob + re-routes the primary secret).
+- Sending `"password": null`/`""` or `"notes": null`/`""` clears the field.
 - Sending the key with a string value re-encrypts.
 - Omitting the key leaves the existing ciphertext untouched.
 Response 200:
@@ -499,6 +543,58 @@ Per-item `failed.reason` values:
 - `user_not_in_workspace` / `team_not_in_workspace` — (`share`) the grantee principal does not belong to that item's org.
 
 **Share semantics** mirror single-share (`POST /items/:id/members`): a plain **permanent** grant (no expiry), idempotent upsert keyed on `(itemId, principal)` — re-sharing updates the role only and never disturbs an existing temp grant's `originalRole` baseline. Each successful share writes an `item.share` (user) / `item.team_share` (team) audit event with `metadata.bulk: true` and emits a `share.received` notification. No secret values are ever logged.
+
+## Endpoints — Search
+
+### `GET /search` (US-017 / AC-017.2/.3/.5 · FR-041/042 — Cmd+K)
+
+Fuzzy item search over **plaintext metadata only**. Phase A is server-side
+search; Phase C will swap in a client-built blind index. Requires auth + 2FA
+enrollment (same gate as the rest of the app). NOT audited per-query and the
+query string is never logged.
+
+Query params:
+- `q` — required, 1–200 chars (trimmed). Matched case-insensitively as a
+  substring against `name`, `username`, `url`, and `type` (the only plaintext
+  columns). Secret fields and the encrypted notes meta blob (tags, totp, card
+  number, etc.) are NEVER searched.
+- `limit` — optional int, 1–50, default **20**.
+
+RBAC + scope:
+- Scoped to the caller's **active workspace** (`vaults.orgId` = active org).
+- Each result is filtered to items the caller can access at ≥ `view_metadata`
+  via the same most-specific-wins engine as `GET /vaults/:id/items` (item
+  override → folder grant → vault membership → team grants, honoring temp-grant
+  expiry). Items with no effective grant are omitted (anti-enumeration — a query
+  never reveals the existence of items in another org or behind a missing
+  permission). An `auditor` sees the whole active org as `viewer`.
+
+Sort (AC-017.3): exact (case-insensitive) name match first → most recently used
+(`lastUsedAt DESC`, nulls last) → alphabetical by name.
+
+Response 200:
+```ts
+{
+  results: Array<{
+    id: string;
+    vaultId: string;
+    vaultName: string;
+    folderId: string | null;
+    type: ItemType;                 // one of the six kinds
+    name: string;
+    username: string | null;
+    url: string | null;
+    hasPassword: boolean;
+    hasNotes: boolean;
+    lastUsedAt: string | null;
+    updatedAt: string;
+    effectiveRole: "manager" | "editor" | "user" | "viewer";
+  }>;
+}
+```
+No secret material (password/notes/ciphertext) is ever included. Returns
+`{ "results": [] }` when the caller has no active workspace or nothing matches.
+`q` missing/empty/too long → 400 `validation_error`.
 
 ## User shape (canonical)
 

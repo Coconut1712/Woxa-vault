@@ -25,6 +25,7 @@ import { teamRoutes } from "@/routes/teams";
 import { notificationRoutes } from "@/routes/notifications";
 import { accessRequestRoutes } from "@/routes/accessRequests";
 import { publicSendRoutes, sendRoutes } from "@/routes/sends";
+import { searchRoutes } from "@/routes/search";
 import { ssoRoutes } from "@/routes/sso";
 import { trashRoutes } from "@/routes/trash";
 import { twoFactorRoutes } from "@/routes/twoFactor";
@@ -119,6 +120,8 @@ export function createApp() {
   // Internal route ordering (unread-count / read-all before /:id/read) lives in
   // the router itself.
   app.route("/notifications", notificationRoutes);
+  // US-017 Cmd+K item search over plaintext metadata (RBAC + org-scoped).
+  app.route("/search", searchRoutes);
   app.route("/sends", sendRoutes);
   // Public reveal flow lives at /s/:token; no `requireAuth` middleware on
   // this subtree (publicSendRoutes intentionally omits requireAuth).

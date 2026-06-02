@@ -117,28 +117,28 @@
     {
       "idx": 16,
       "version": "7",
-      "when": 1780200000000,
+      "when": 1779820000000,
       "tag": "0016_red_crystal",
       "breakpoints": true
     },
     {
       "idx": 17,
       "version": "7",
-      "when": 1780300000000,
+      "when": 1779830000000,
       "tag": "0017_wide_robbie_robertson",
       "breakpoints": true
     },
     {
       "idx": 18,
       "version": "7",
-      "when": 1780400000000,
+      "when": 1779840000000,
       "tag": "0018_lyrical_moonstone",
       "breakpoints": true
     },
     {
       "idx": 19,
       "version": "7",
-      "when": 1780500000000,
+      "when": 1779850000000,
       "tag": "0019_flowery_nightshade",
       "breakpoints": true
     },
@@ -168,6 +168,27 @@
       "version": "7",
       "when": 1779945079550,
       "tag": "0023_add_master_auth_key_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1779945100000,
+      "tag": "0024_chilly_harry_osborn",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1779945200000,
+      "tag": "0025_premium_hellcat",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1780600000001,
+      "tag": "0026_trgm_index_backfill",
       "breakpoints": true
     }
   ]

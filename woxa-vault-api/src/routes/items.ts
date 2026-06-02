@@ -8,6 +8,7 @@ import {
   folders,
   itemMembers,
   itemTeamMembers,
+  itemVersions,
   items,
   teamMembers,
   teams,
@@ -55,8 +56,18 @@ import { createNotification } from "@/lib/notifications";
 // Schemas
 // ---------------------------------------------------------------------------
 
-const TYPES = ["login", "note"] as const;
+// US-012 / FR-030: six item kinds. `type` is PLAINTEXT metadata (a label that
+// drives which form/icon the UI renders) — it is NOT a secret. All type-
+// specific SECRET values (api_key key, ssh private key/passphrase, card
+// number/CVV, identity PII, and any customField marked `secret`) are encrypted
+// by the client into the item's password/notes ciphertext columns via the
+// existing item-DEK envelope. The server therefore needs no new secret columns
+// to support the extra kinds — only a wider `type` vocabulary. Kept in sync
+// with the frontend DisplayKind union (woxa-vault-web/src/lib/item-meta.ts):
+// note the ssh kind is spelled `ssh`, NOT `ssh_key`.
+const TYPES = ["login", "note", "api_key", "ssh", "card", "identity"] as const;
 const typeSchema = z.enum(TYPES);
+type ItemTypeName = (typeof TYPES)[number];
 
 const uuidParam = z.object({ id: z.string().uuid() });
 const vaultIdParam = z.object({ id: z.string().uuid() });
@@ -83,6 +94,10 @@ const createSchema = z.object({
 });
 
 const patchSchema = z.object({
+  // Allow converting an item between the six kinds (e.g. note → card). Plaintext
+  // label only; secret payload migration is the client's job (it re-encodes the
+  // notes meta blob + re-routes the primary secret).
+  type: typeSchema.optional(),
   name: z.string().trim().min(1).max(120).optional(),
   username: z.string().trim().max(254).nullable().optional(),
   url: z.string().trim().max(2048).nullable().optional(),
@@ -143,7 +158,7 @@ interface ItemSummary {
   id: string;
   vaultId: string;
   folderId: string | null;
-  type: "login" | "note";
+  type: ItemTypeName;
   name: string;
   username: string | null;
   url: string | null;
@@ -155,6 +170,10 @@ interface ItemSummary {
   createdAt: string;
   updatedAt: string;
   lastUsedAt: string | null;
+  // US-015 AC-015.3 / FR-039: when the password was last set/rotated. NULL when
+  // the item has never had a password. ISO-8601 string for the frontend to
+  // render "password last changed X ago".
+  passwordChangedAt: string | null;
   createdBy: { id: string; displayName: string };
   // Effective role of the CURRENT caller for this item (DESIGN.md §11 most-
   // specific-wins). Optional so single-item serializers that don't compute it
@@ -165,6 +184,11 @@ interface ItemSummary {
 interface ItemFull extends ItemSummary {
   password: string | null;
   notes: string | null;
+  // totpSecret + type-specific secrets (api_key/ssh/card/identity) and custom
+  // fields live INSIDE the encrypted notes blob (the client `__WOXA_META__`
+  // overlay), so the server never surfaces them as discrete plaintext fields.
+  // These two keys are kept null/empty for wire-shape stability with the
+  // frontend ItemFull contract; the client decodes the real values from notes.
   totpSecret: null;
   customFields: [];
 }
@@ -189,6 +213,7 @@ function toSummary(
     createdAt: it.createdAt.toISOString(),
     updatedAt: it.updatedAt.toISOString(),
     lastUsedAt: it.lastUsedAt ? it.lastUsedAt.toISOString() : null,
+    passwordChangedAt: it.passwordChangedAt ? it.passwordChangedAt.toISOString() : null,
     createdBy: creator,
   };
 }
@@ -315,6 +340,155 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     }
   })
 
+  // US-015 AC-015.2 / FR-037: list an item's version history (last 10).
+  // VIEW-gated — anyone with effective access to the item (including a metadata-
+  // only viewer / org auditor) may see the LIST of versions. The list carries
+  // NO secret material — only metadata (version number, who edited, when, and
+  // presence flags). No access → 404 (anti-enumeration). MUST be registered
+  // BEFORE the generic `/:id` so `/:id/versions` isn't shadowed.
+  .get("/:id/versions", paramValidator(uuidParam), async (c) => {
+    const user = c.get("user")!;
+    const { id } = c.req.valid("param");
+
+    const access = await loadItemForUser(id, user.id);
+    if (!access) throw errors.notFound("Item not found");
+
+    const rows = await db
+      .select({
+        versionNumber: itemVersions.versionNumber,
+        type: itemVersions.type,
+        name: itemVersions.name,
+        modifiedByEmail: itemVersions.modifiedByEmail,
+        modifiedAt: itemVersions.modifiedAt,
+        hasPassword: sql<boolean>`${itemVersions.passwordCiphertext} is not null`,
+        hasNotes: sql<boolean>`${itemVersions.notesCiphertext} is not null`,
+        encryptionVersion: itemVersions.encryptionVersion,
+      })
+      .from(itemVersions)
+      .where(eq(itemVersions.itemId, id))
+      .orderBy(desc(itemVersions.versionNumber))
+      // FR-037 / AC-015.2: surface the "10 most recent" versions. Pruning keeps
+      // at most 10 rows per item, but LIMIT makes the contract explicit and
+      // resilient to any pre-prune backlog.
+      .limit(10);
+
+    return c.json({
+      // Whether the CALLER may reveal a version's secret content. Lets the
+      // frontend hide/disable the "view content" affordance for viewers.
+      canReveal: canRevealItem(access.role),
+      versions: rows.map((r) => ({
+        version: r.versionNumber,
+        type: r.type,
+        name: r.name,
+        editedByEmail: r.modifiedByEmail,
+        createdAt: r.modifiedAt.toISOString(),
+        hasPassword: r.hasPassword,
+        hasNotes: r.hasNotes,
+      })),
+    });
+  })
+
+  // US-015 AC-015.2: reveal a single historical version's decrypted CONTENT.
+  // REVEAL-gated — same capability as GET /:id/password (viewer / auditor →
+  // 403). Each version snapshot carries its own wrapped DEK so it decrypts
+  // self-contained even after the live item rotated keys. Audited as
+  // `item.version_view` (like a reveal). MUST precede the generic `/:id`.
+  .get(
+    "/:id/versions/:version",
+    requireVaultUnlocked,
+    paramValidator(z.object({ id: z.string().uuid(), version: z.coerce.number().int().positive() })),
+    async (c) => {
+      const user = c.get("user")!;
+      const { id, version } = c.req.valid("param");
+
+      const access = await loadItemForUser(id, user.id);
+      if (!access) throw errors.notFound("Item not found");
+
+      // REVEAL-gate on the EFFECTIVE role only — mirrors GET /:id/password.
+      // resolveItemRole already maps a pure org-auditor to `viewer` (blocked by
+      // canRevealItem), so a redundant `isAuditor` check here would WRONGLY block
+      // an auditor who also holds an editor/manager item/folder/vault grant
+      // (their effective role is editor/manager, not viewer). Viewers stay 403.
+      if (!canRevealItem(access.role)) {
+        throw errors.forbidden("Read-only access to this item");
+      }
+
+      const snap = await db.query.itemVersions.findFirst({
+        where: and(eq(itemVersions.itemId, id), eq(itemVersions.versionNumber, version)),
+      });
+      if (!snap) throw errors.notFound("Version not found");
+
+      const audit = async (encVersion: number) => {
+        await db.insert(auditEvents).values({
+          orgId: access.vault.orgId,
+          actorUserId: user.id,
+          actorEmail: user.email,
+          action: "item.version_view",
+          targetType: "item",
+          targetId: id,
+          targetName: access.item.name,
+          ipHash: hashIp(getClientIp(c)),
+          userAgent: c.req.header("user-agent") ?? null,
+          success: true,
+          metadata: { version, encryptionVersion: encVersion },
+        });
+      };
+
+      // Phase C ZK: hand back the snapshot ciphertext blobs; client decrypts.
+      if (snap.encryptionVersion === 2) {
+        await audit(2);
+        return c.json({
+          version: snap.versionNumber,
+          type: snap.type,
+          name: snap.name,
+          username: snap.username,
+          url: snap.url,
+          passwordCiphertext: snap.passwordCiphertext?.toString("base64") ?? null,
+          passwordIv: snap.passwordIv?.toString("base64") ?? null,
+          notesCiphertext: snap.notesCiphertext?.toString("base64") ?? null,
+          notesIv: snap.notesIv?.toString("base64") ?? null,
+          createdAt: snap.modifiedAt.toISOString(),
+          editedByEmail: snap.modifiedByEmail,
+        });
+      }
+
+      // Phase A: unwrap the snapshot's OWN DEK, decrypt its fields, zeroize.
+      let dek: Buffer | null = null;
+      try {
+        const password =
+          snap.passwordCiphertext && snap.passwordIv && snap.dekCiphertext && snap.dekIv
+            ? (() => {
+                dek = unwrapDek({ dekCiphertext: snap.dekCiphertext!, dekIv: snap.dekIv! });
+                return decryptField(dek, snap.passwordCiphertext!, snap.passwordIv!);
+              })()
+            : null;
+        const notes =
+          snap.notesCiphertext && snap.notesIv && snap.dekCiphertext && snap.dekIv
+            ? (() => {
+                dek ??= unwrapDek({ dekCiphertext: snap.dekCiphertext!, dekIv: snap.dekIv! });
+                return decryptField(dek, snap.notesCiphertext!, snap.notesIv!);
+              })()
+            : null;
+
+        await audit(1);
+
+        return c.json({
+          version: snap.versionNumber,
+          type: snap.type,
+          name: snap.name,
+          username: snap.username,
+          url: snap.url,
+          password,
+          notes,
+          createdAt: snap.modifiedAt.toISOString(),
+          editedByEmail: snap.modifiedByEmail,
+        });
+      } finally {
+        zeroize(dek);
+      }
+    },
+  )
+
   // GET /items/:id is now VIEW-only — it returns item metadata + decrypted
   // `notes` (the frontend decodes folder/tags/favorite/totp meta out of the
   // notes blob) but NEVER the password (`password: null`, WITHHELD). The real
@@ -432,6 +606,49 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
 
     const patch: Partial<typeof items.$inferInsert> = { updatedAt: new Date() };
 
+    // US-015 AC-015.3 / FR-039: a password CHANGE resets password_changed_at.
+    // "Changed" is signaled by the password field being PRESENT in the body
+    // (the frontend contract is: omit the key to leave the ciphertext untouched,
+    // send a value to replace it, send null/"" to clear it). Phase A signals via
+    // `password`; ZK (Phase C) via `passwordCiphertext`. Clearing the password
+    // (null/empty) does NOT count as a rotation — it removes the secret.
+    //
+    // CONTRACT (presence-based, deliberate): we CANNOT detect "same value
+    // re-sent" server-side. AES-256-GCM uses a fresh random IV per encryption
+    // (Phase A) and the client supplies opaque ciphertext (Phase C), so equal
+    // plaintext yields different bytes every time — there is nothing to compare.
+    // The frontend therefore MUST omit `password`/`passwordCiphertext` from the
+    // PATCH body when the user did not touch the field (it does). The downside
+    // of a stale `password_changed_at` is cosmetic (a rotation-age badge), not a
+    // security boundary, so we keep the cheap presence-based rule rather than add
+    // an explicit `passwordChanged` flag the client could get wrong or spoof.
+    const pwPresent =
+      access.vault.encryptionVersion === 2
+        ? body.passwordCiphertext !== undefined
+        : body.password !== undefined;
+    const pwCleared =
+      access.vault.encryptionVersion === 2
+        ? body.passwordCiphertext === undefined || body.passwordCiphertext === ""
+        : body.password === null || body.password === "";
+    const passwordChanged = pwPresent && !pwCleared;
+    if (passwordChanged) patch.passwordChangedAt = new Date();
+
+    // US-015 AC-015.2 / FR-037: snapshot the item's CURRENT state into
+    // item_versions BEFORE applying the edit, but ONLY when an edit touches
+    // CONTENT (name/username/url/type/password/notes). Metadata-only PATCHes
+    // (e.g. just folderId) do not create a version — they don't change the
+    // material a user would want to roll back / inspect.
+    const contentChanged =
+      body.name !== undefined ||
+      body.username !== undefined ||
+      body.url !== undefined ||
+      body.type !== undefined ||
+      body.password !== undefined ||
+      body.notes !== undefined ||
+      body.passwordCiphertext !== undefined ||
+      body.notesCiphertext !== undefined;
+
+    if (body.type !== undefined) patch.type = body.type;
     if (body.name !== undefined) patch.name = body.name;
     if (body.username !== undefined) patch.username = body.username;
     if (body.url !== undefined) patch.url = body.url;
@@ -494,21 +711,94 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
       }
     }
 
-    const [updated] = await db.update(items).set(patch).where(eq(items.id, id)).returning();
-    if (!updated) throw errors.notFound("Item not found");
+    // Atomic: snapshot (if content changed) + prune to last 10 + update + audit
+    // all commit or roll back together (FR-037 / AC-015.2). The snapshot is the
+    // state BEFORE this edit, copied from `access.item` (the row we loaded).
+    const updated = await db.transaction(async (tx) => {
+      // Serialize concurrent PATCHes on THE SAME item: take a row lock on the
+      // items row first. Two parallel edits (or a double-click) would otherwise
+      // both read MAX(version_number) and compute the same nextVersion, then
+      // collide on the unique (item_id, version_number) index → 500 + rollback
+      // of the whole edit. FOR UPDATE makes the second transaction block until
+      // the first commits, so it reads the post-insert MAX and gets +1. The lock
+      // is released at commit/rollback; metadata-only PATCHes also take it so the
+      // serialization point is consistent regardless of contentChanged.
+      const lockRows = await tx
+        .select({ id: items.id })
+        .from(items)
+        .where(eq(items.id, id))
+        .for("update");
+      if (lockRows.length === 0) throw errors.notFound("Item not found");
 
-    await db.insert(auditEvents).values({
-      orgId: access.vault.orgId,
-      actorUserId: user.id,
-      actorEmail: user.email,
-      action: "item.update",
-      targetType: "item",
-      targetId: id,
-      targetName: updated.name,
-      ipHash: hashIp(getClientIp(c)),
-      userAgent: c.req.header("user-agent") ?? null,
-      success: true,
-      metadata: { fields: Object.keys(body), encryptionVersion: access.vault.encryptionVersion },
+      if (contentChanged) {
+        const prev = access.item;
+        // version_number = max + 1 (running per item). The FOR UPDATE lock above
+        // serializes this read-then-insert; the unique index (item_id,
+        // version_number) remains the last-line backstop.
+        const [maxRow] = await tx
+          .select({ max: sql<number | null>`max(${itemVersions.versionNumber})` })
+          .from(itemVersions)
+          .where(eq(itemVersions.itemId, id));
+        const nextVersion = (maxRow?.max ?? 0) + 1;
+
+        await tx.insert(itemVersions).values({
+          itemId: id,
+          versionNumber: nextVersion,
+          type: prev.type,
+          name: prev.name,
+          username: prev.username,
+          url: prev.url,
+          passwordCiphertext: prev.passwordCiphertext,
+          passwordIv: prev.passwordIv,
+          notesCiphertext: prev.notesCiphertext,
+          notesIv: prev.notesIv,
+          // Snapshot the DEK wrap so this version decrypts self-contained even
+          // after the live item's DEK rotates (NULL in ZK mode).
+          dekCiphertext: prev.dekCiphertext,
+          dekIv: prev.dekIv,
+          encryptionVersion: access.vault.encryptionVersion,
+          modifiedBy: user.id,
+          modifiedByEmail: user.email,
+          changeSummary: Object.keys(body).join(","),
+        });
+
+        // FR-037: keep only the last 10 versions per item. Delete anything
+        // older than the 10 highest version_numbers.
+        await tx.execute(sql`
+          DELETE FROM ${itemVersions}
+          WHERE ${itemVersions.itemId} = ${id}
+            AND ${itemVersions.id} NOT IN (
+              SELECT id FROM ${itemVersions}
+              WHERE ${itemVersions.itemId} = ${id}
+              ORDER BY ${itemVersions.versionNumber} DESC
+              LIMIT 10
+            )
+        `);
+      }
+
+      const [row] = await tx.update(items).set(patch).where(eq(items.id, id)).returning();
+      if (!row) throw errors.notFound("Item not found");
+
+      await tx.insert(auditEvents).values({
+        orgId: access.vault.orgId,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        action: "item.update",
+        targetType: "item",
+        targetId: id,
+        targetName: row.name,
+        ipHash: hashIp(getClientIp(c)),
+        userAgent: c.req.header("user-agent") ?? null,
+        success: true,
+        metadata: {
+          fields: Object.keys(body),
+          encryptionVersion: access.vault.encryptionVersion,
+          versioned: contentChanged,
+          passwordChanged,
+        },
+      });
+
+      return row;
     });
 
     const creator = await creatorFor(updated);
@@ -901,6 +1191,8 @@ export const vaultItemRoutes = new Hono<{
             notesIv: body.notesIv ? Buffer.from(body.notesIv, "base64") : null,
             dekCiphertext: null,
             dekIv: null,
+            // AC-015.3: stamp the initial rotation time when created with a password.
+            passwordChangedAt: body.passwordCiphertext ? new Date() : null,
             createdBy: user.id,
           })
           .returning();
@@ -939,6 +1231,8 @@ export const vaultItemRoutes = new Hono<{
               notesIv: notesIv,
               dekCiphertext: wrapped.dekCiphertext,
               dekIv: wrapped.dekIv,
+              // AC-015.3: stamp the initial rotation time when created with a password.
+              passwordChangedAt: body.password ? new Date() : null,
               createdBy: user.id,
             })
             .returning();
