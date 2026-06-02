@@ -451,4 +451,103 @@ describe("Granular folder/item sharing (integration)", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  // ---- bulk share (US-052 / AC-052.4, AC-052.5) ----------------------------
+
+  it("bulk share grants on items the caller can share + skips items it can't (partial success)", async () => {
+    const owner = await makeUser("admin");
+    const editor = await makeUser("member");
+    const target = await makeUser("member");
+    const vaultId = await makeVault(owner.userId);
+    await addVaultMember(vaultId, owner.userId, "manager");
+    await addVaultMember(vaultId, editor.userId, "editor"); // vault-wide editor
+    const okItem = await makeItem(vaultId, owner.userId);
+
+    // A second item the editor is explicitly DOWNGRADED to viewer on → no
+    // share authority there.
+    const noShareItem = await makeItem(vaultId, owner.userId);
+    await req(`/items/${noShareItem}/members`, owner.cookie, {
+      method: "POST",
+      body: JSON.stringify({ userId: editor.userId, role: "viewer" }),
+    });
+
+    const res = await req(`/items/bulk`, editor.cookie, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "share",
+        itemIds: [okItem, noShareItem],
+        payload: { userId: target.userId, role: "editor" },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      success: string[];
+      failed: { id: string; reason: string }[];
+    };
+    expect(body.success).toEqual([okItem]);
+    expect(body.failed).toEqual([{ id: noShareItem, reason: "forbidden" }]);
+
+    // The grant actually landed: target can now reveal okItem.
+    expect((await req(`/items/${okItem}/password`, target.cookie)).status).toBe(200);
+    // ...but NOT the skipped item.
+    expect((await req(`/items/${noShareItem}`, target.cookie)).status).toBe(404);
+  });
+
+  it("bulk share rejects a role above the caller's authority (no escalation)", async () => {
+    const owner = await makeUser("admin");
+    const editor = await makeUser("member");
+    const target = await makeUser("member");
+    const vaultId = await makeVault(owner.userId);
+    await addVaultMember(vaultId, owner.userId, "manager");
+    await addVaultMember(vaultId, editor.userId, "editor");
+    const itemA = await makeItem(vaultId, owner.userId);
+    const itemB = await makeItem(vaultId, owner.userId);
+
+    // editor → grant manager via bulk: every item skipped (forbidden), none granted.
+    const res = await req(`/items/bulk`, editor.cookie, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "share",
+        itemIds: [itemA, itemB],
+        payload: { userId: target.userId, role: "manager" },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      success: string[];
+      failed: { id: string; reason: string }[];
+    };
+    expect(body.success).toEqual([]);
+    expect(body.failed.map((f) => f.reason)).toEqual(["forbidden", "forbidden"]);
+  });
+
+  it("bulk share rejects a payload missing role/principal at the schema layer (400)", async () => {
+    const owner = await makeUser("admin");
+    const vaultId = await makeVault(owner.userId);
+    await addVaultMember(vaultId, owner.userId, "manager");
+    const itemId = await makeItem(vaultId, owner.userId);
+
+    // role present but BOTH principals → ambiguous → 400.
+    const target = await makeUser("member");
+    const ambiguous = await req(`/items/bulk`, owner.cookie, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "share",
+        itemIds: [itemId],
+        payload: { userId: target.userId, teamId: randomUUID(), role: "viewer" },
+      }),
+    });
+    expect(ambiguous.status).toBe(400);
+
+    // missing role → 400.
+    const noRole = await req(`/items/bulk`, owner.cookie, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "share",
+        itemIds: [itemId],
+        payload: { userId: target.userId },
+      }),
+    });
+    expect(noRole.status).toBe(400);
+  });
 });

@@ -463,6 +463,43 @@ Caller needs role `manager`, `editor`, or `user`.
 ### `DELETE /items/:id`
 Response 204 (no body). Caller needs role `manager`, `editor`, or `user`.
 
+### `POST /items/bulk`
+Batch operation over up to 100 items. Authorization is evaluated **per item** — a caller without rights on a given item has that item SKIPPED (reported in `failed`), never failing the whole batch (US-052 / AC-052.5 partial success).
+
+```ts
+type BulkAction = "delete" | "move" | "share";
+
+interface BulkRequest {
+  action: BulkAction;
+  itemIds: string[];            // 1..100 uuids
+  payload?: {
+    // action="move"
+    folderId?: string | null;   // target folder in the SAME vault, or null = root
+    // action="share" (US-052 bulk share)
+    role?: "manager" | "editor" | "user" | "viewer";   // REQUIRED for share
+    userId?: string;            // share to a user — EXACTLY ONE of userId/teamId
+    teamId?: string;            // share to a team — EXACTLY ONE of userId/teamId
+  };
+}
+
+interface BulkResponse {
+  success: string[];                              // item ids that succeeded
+  failed: { id: string; reason: string }[];       // skipped/failed items
+}
+```
+
+Response 200 with `BulkResponse` (even on partial/total failure — inspect `failed`). Schema-level rejects return 400:
+- `share` with no `payload.role` → 400.
+- `share` with neither or BOTH of `userId`/`teamId` → 400 (must be exactly one).
+
+Per-item `failed.reason` values:
+- `not_found` — item missing or caller has no access at all (anti-enumeration).
+- `forbidden` — `delete`/`move`: caller lacks `manager`/`editor`/`user` on the item. `share`: caller lacks share authority on THAT item, or the requested `role` exceeds the caller's authority (no escalation — same cap as single-share `POST /items/:id/members`).
+- `folder_not_found` — (`move`) target folder is not in the item's vault.
+- `user_not_in_workspace` / `team_not_in_workspace` — (`share`) the grantee principal does not belong to that item's org.
+
+**Share semantics** mirror single-share (`POST /items/:id/members`): a plain **permanent** grant (no expiry), idempotent upsert keyed on `(itemId, principal)` — re-sharing updates the role only and never disturbs an existing temp grant's `originalRole` baseline. Each successful share writes an `item.share` (user) / `item.team_share` (team) audit event with `metadata.bulk: true` and emits a `share.received` notification. No secret values are ever logged.
+
 ## User shape (canonical)
 
 ```ts

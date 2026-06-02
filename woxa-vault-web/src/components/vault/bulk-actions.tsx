@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Trash2, FolderInput, X, Check } from "lucide-react";
+import { Trash2, FolderInput, X, Share2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { 
   Dialog, 
@@ -20,8 +20,11 @@ import {
 } from "@/components/ui/select";
 import { useT } from "@/lib/i18n/provider";
 import { bulkItems } from "@/lib/api/items";
+import type { BulkSharePayload } from "@/lib/api/items";
 import { toast } from "sonner";
 import { useFolders } from "@/lib/folders/provider";
+import { BulkShareDialog, type BulkSharePrincipal } from "@/components/vault/bulk-share-dialog";
+import type { VaultRole } from "@/lib/api/types";
 
 interface BulkActionsBarProps {
   selectedIds: string[];
@@ -37,6 +40,7 @@ export function BulkActionsBar({ selectedIds, vaultId, onClear, onComplete }: Bu
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [targetFolderId, setTargetFolderId] = useState<string>("none");
   const [busy, setBusy] = useState(false);
 
@@ -79,6 +83,28 @@ export function BulkActionsBar({ selectedIds, vaultId, onClear, onComplete }: Bu
     }
   };
 
+  const handleBulkShare = async (principal: BulkSharePrincipal, role: VaultRole) => {
+    setBusy(true);
+    try {
+      const payload: BulkSharePayload =
+        principal.type === "user"
+          ? { role, userId: principal.id }
+          : { role, teamId: principal.id };
+      const res = await bulkItems("share", selectedIds, payload);
+      if (res.failed.length === 0) {
+        toast.success(t("bulk.success.shared", { n: res.success.length }));
+      } else {
+        toast.info(t("bulk.share.partial", { s: res.success.length, f: res.failed.length }));
+      }
+      onComplete();
+      setShareOpen(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
       <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-bottom-4 duration-300">
@@ -89,9 +115,19 @@ export function BulkActionsBar({ selectedIds, vaultId, onClear, onComplete }: Bu
           
           <div className="h-6 w-px bg-line-2 mx-1" />
 
-          <Button 
-            variant="ghost" 
-            size="sm" 
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-9 px-3 text-xs gap-1.5"
+            onClick={() => setShareOpen(true)}
+          >
+            <Share2 className="size-3.5" />
+            {t("bulk.action.share")}
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="sm"
             className="h-9 px-3 text-xs gap-1.5"
             onClick={() => setMoveOpen(true)}
           >
@@ -99,7 +135,7 @@ export function BulkActionsBar({ selectedIds, vaultId, onClear, onComplete }: Bu
             {t("bulk.action.move")}
           </Button>
 
-          <Button 
+          <Button
             variant="ghost" 
             size="sm" 
             className="h-9 px-3 text-xs gap-1.5 text-destructive hover:text-destructive hover:bg-destructive/10"
@@ -131,7 +167,7 @@ export function BulkActionsBar({ selectedIds, vaultId, onClear, onComplete }: Bu
             <Button variant="ghost" onClick={() => setDeleteOpen(false)} disabled={busy}>
               {t("common.cancel")}
             </Button>
-            <Button variant="destructive" onClick={handleBulkDelete} loading={busy}>
+            <Button variant="destructive" onClick={handleBulkDelete} disabled={busy}>
               {t("bulk.delete.confirm")}
             </Button>
           </DialogFooter>
@@ -147,7 +183,7 @@ export function BulkActionsBar({ selectedIds, vaultId, onClear, onComplete }: Bu
           </DialogHeader>
           
           <div className="py-4">
-            <Select value={targetFolderId} onValueChange={setTargetFolderId}>
+            <Select value={targetFolderId} onValueChange={(v) => setTargetFolderId(v ?? "none")}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -164,12 +200,21 @@ export function BulkActionsBar({ selectedIds, vaultId, onClear, onComplete }: Bu
             <Button variant="ghost" onClick={() => setMoveOpen(false)} disabled={busy}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={handleBulkMove} loading={busy}>
+            <Button onClick={handleBulkMove} disabled={busy}>
               {t("bulk.move.confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Share Dialog */}
+      <BulkShareDialog
+        open={shareOpen}
+        onOpenChange={setShareOpen}
+        count={n}
+        busy={busy}
+        onConfirm={handleBulkShare}
+      />
     </>
   );
 }

@@ -764,6 +764,7 @@ export const translations: Dict = {
   "members.open_inviter": { en: "Open inviter", th: "เปิดตัวจัดการคำเชิญ" },
   "members.role.owner": { en: "Owner", th: "เจ้าของ" },
   "members.role.admin": { en: "Admin", th: "แอดมิน" },
+  "members.role.auditor": { en: "Auditor", th: "ผู้ตรวจสอบ" },
   "members.role.member": { en: "Member", th: "สมาชิก" },
   "members.role.guest": { en: "Guest", th: "บุคคลภายนอก" },
   "members.role.all": { en: "All", th: "ทั้งหมด" },
@@ -810,6 +811,10 @@ export const translations: Dict = {
   "invite.role.admin.desc": {
     en: "Manage workspace, teams, billing, audit",
     th: "จัดการเวิร์กสเปซ ทีม การเรียกเก็บเงิน และ audit",
+  },
+  "invite.role.auditor.desc": {
+    en: "External compliance party. Metadata-only view of items and full audit log. No secret access.",
+    th: "บุคคลภายนอก ดูได้เฉพาะชื่อรายการและประวัติการใช้งาน ห้ามเข้าถึงรหัสผ่านเด็ดขาด",
   },
   "invite.role.member.desc": {
     en: "Standard team access. Joins via SSO and group sync.",
@@ -1338,6 +1343,7 @@ export const translations: Dict = {
   "bulk.selected": { en: "{n} selected", th: "เลือกอยู่ {n} รายการ" },
   "bulk.action.delete": { en: "Delete", th: "ลบ" },
   "bulk.action.move": { en: "Move to folder", th: "ย้ายไปโฟลเดอร์" },
+  "bulk.action.share": { en: "Share", th: "แชร์" },
   "bulk.delete.title": { en: "Delete {n} items?", th: "ลบ {n} รายการ?" },
   "bulk.delete.desc": { en: "These items will be moved to the trash. You can restore them within 30 days.", th: "รายการเหล่านี้จะถูกย้ายไปที่ถังขยะ คุณสามารถกู้คืนได้ภายใน 30 วัน" },
   "bulk.delete.confirm": { en: "Delete Items", th: "ลบรายการ" },
@@ -1347,6 +1353,17 @@ export const translations: Dict = {
   "bulk.success.deleted": { en: "Successfully deleted {n} items", th: "ลบสำเร็จ {n} รายการ" },
   "bulk.success.moved": { en: "Successfully moved {n} items", th: "ย้ายสำเร็จ {n} รายการ" },
   "bulk.partial_success": { en: "{s} items succeeded, {f} items failed", th: "สำเร็จ {s} รายการ, ล้มเหลว {f} รายการ" },
+  "bulk.share.title": { en: "Share {n} items", th: "แชร์ {n} รายการ" },
+  "bulk.share.desc": {
+    en: "Grant a person or team access to all selected items. Items you don't manage are skipped.",
+    th: "ให้สิทธิ์เข้าถึงทุกรายการที่เลือกแก่ผู้ใช้หรือทีม รายการที่คุณไม่มีสิทธิ์จัดการจะถูกข้าม",
+  },
+  "bulk.share.recipient": { en: "Recipient", th: "ผู้รับสิทธิ์" },
+  "bulk.share.no_recipient": { en: "Select a person or team to share with", th: "เลือกผู้ใช้หรือทีมที่จะแชร์ให้" },
+  "bulk.share.confirm": { en: "Share Items", th: "แชร์รายการ" },
+  "bulk.success.shared": { en: "Shared {n} items", th: "แชร์สำเร็จ {n} รายการ" },
+  "teams.member_count": { en: "{n} members", th: "สมาชิก {n} คน" },
+  "bulk.share.partial": { en: "Shared {s} · skipped {f}", th: "แชร์ {s} · ข้าม {f}" },
 
   "audit.action.import_start": { en: "Started import", th: "เริ่มการนำเข้า" },
   "upgrade.title": { en: "Security Upgrade Required", th: "จำเป็นต้องอัปเกรดความปลอดภัย" },
@@ -3015,12 +3032,16 @@ export const translations: Dict = {
   },
   "api.retry": { en: "Try again", th: "ลองอีกครั้ง" },
   "api.error.forbidden_title": {
-    en: "You don't have access",
-    th: "คุณไม่มีสิทธิ์เข้าถึง",
+    en: "Access restricted",
+    th: "ข้อจำกัดในการเข้าถึง",
   },
   "api.error.forbidden_desc": {
-    en: "Ask a vault manager to grant you access.",
-    th: "ขอให้ผู้จัดการตู้นิรภัยให้สิทธิ์คุณก่อน",
+    en: "You don't have permission to view this section or perform this action.",
+    th: "คุณไม่มีสิทธิ์เข้าถึงส่วนนี้ หรือไม่มีสิทธิ์ดำเนินการดังกล่าว",
+  },
+  "api.error.forbidden_auditor_desc": {
+    en: "As an Auditor, you have metadata-only access. Secret material and management actions are strictly restricted.",
+    th: "ในบทบาทผู้ตรวจสอบ คุณสามารถดูได้เฉพาะข้อมูลทั่วไปเท่านั้น ระบบจำกัดการเข้าถึงข้อมูลลับและการจัดการต่างๆ ไว้",
   },
   "api.error.not_found_title": {
     en: "Not found",
@@ -3092,16 +3113,16 @@ export const translations: Dict = {
   /* ---- View-only (effective viewer) ---- */
   "item.share": { en: "Share", th: "แชร์" },
   "item.readonly_notice": {
-    en: "You have view-only access",
-    th: "คุณมีสิทธิ์เข้าถึงแบบดูอย่างเดียว",
+    en: "Access restricted",
+    th: "ข้อจำกัดในการเข้าถึง",
   },
   "item.readonly_secret": {
-    en: "Hidden — view-only access",
-    th: "ซ่อนอยู่ — สิทธิ์ดูอย่างเดียว",
+    en: "Hidden by security policy",
+    th: "ถูกซ่อนตามนโยบายความปลอดภัย",
   },
   "item.readonly_notice_desc": {
-    en: "Your role on this item is Viewer, so secrets stay hidden. Ask a manager for higher access.",
-    th: "บทบาทของคุณบนรายการนี้คือ Viewer ข้อมูลลับจึงถูกซ่อนไว้ ติดต่อ Manager เพื่อขอสิทธิ์เพิ่ม",
+    en: "You can view this item's metadata, but your role doesn't have permission to reveal secrets or edit data.",
+    th: "คุณสามารถดูข้อมูลทั่วไปได้ แต่บทบาทของคุณไม่มีสิทธิ์ดูรหัสผ่านหรือแก้ไขข้อมูล",
   },
 
   /* ---- Item reveal (decrypted) ---- */
@@ -3856,39 +3877,51 @@ export const translations: Dict = {
   /* ---- Recovery Kit modal (shared across setup/regenerate/signup) ---- */
   "recovery_kit_modal.title.setup": {
     en: "Save Your Recovery Kit",
-    th: "บันทึก Recovery Kit ของคุณ",
+    th: "บันทึกชุดกู้คืนบัญชีของคุณ",
   },
   "recovery_kit_modal.title.regenerate": {
     en: "New Recovery Kit Generated",
-    th: "สร้าง Recovery Kit ใหม่แล้ว",
+    th: "สร้างชุดกู้คืนบัญชีใหม่แล้ว",
   },
   "recovery_kit_modal.title.signup": {
     en: "Welcome — Save Your Recovery Kit",
-    th: "ยินดีต้อนรับ — บันทึก Recovery Kit ของคุณ",
+    th: "ยินดีต้อนรับ — บันทึกชุดกู้คืนบัญชีของคุณ",
   },
   "recovery_kit_modal.subtitle": {
-    en: "This code is the only way to recover your account if you forget your master password.",
-    th: "Code นี้เป็นวิธีเดียวในการกู้คืนบัญชีหากคุณลืม Master Password",
+    en: "This 24-word mnemonic is the only way to recover your account if you forget your master password.",
+    th: "คำศัพท์ 24 คำนี้คือทางเดียวที่จะกู้คืนบัญชีได้หากคุณลืมรหัสผ่านมาสเตอร์",
   },
   "recovery_kit_modal.warning_one_time": {
-    en: "This is the only time you will see this code. If you lose it, you cannot recover your account.",
-    th: "คุณจะเห็น Code นี้เพียงครั้งเดียวเท่านั้น หากทำหายจะกู้คืนบัญชีไม่ได้",
+    en: "This is the only time you will see these words. If you lose them, you cannot recover your account.",
+    th: "คุณจะเห็นชุดคำศัพท์นี้เพียงครั้งเดียวเท่านั้น หากทำหายจะกู้คืนบัญชีไม่ได้",
   },
   "recovery_kit_modal.code_label": {
-    en: "Recovery code",
-    th: "Recovery code",
+    en: "Recovery Mnemonic",
+    th: "ชุดคำศัพท์กู้คืน",
   },
   "recovery_kit_modal.checkbox.saved": {
-    en: "I have saved my recovery code somewhere safe.",
-    th: "ฉันได้บันทึก Recovery Code ไว้ในที่ปลอดภัยแล้ว",
+    en: "I have saved my recovery mnemonic somewhere safe.",
+    th: "ฉันได้บันทึกชุดคำศัพท์กู้คืนไว้ในที่ปลอดภัยแล้ว",
   },
   "recovery_kit_modal.checkbox.understood": {
-    en: "I understand this code will not be shown again.",
-    th: "ฉันเข้าใจว่าจะไม่มีการแสดง Code นี้อีก",
+    en: "I understand these words will not be shown again.",
+    th: "ฉันเข้าใจว่าจะไม่มีการแสดงชุดคำศัพท์นี้อีก",
   },
   "recovery_kit_modal.action.copy": {
-    en: "Copy",
-    th: "คัดลอก",
+    en: "Copy words",
+    th: "คัดลอกคำศัพท์",
+  },
+  "recovery_kit_modal.action.download_pdf": {
+    en: "Download PDF",
+    th: "ดาวน์โหลด PDF",
+  },
+  "recovery_kit_modal.action.print": {
+    en: "Print Kit",
+    th: "พิมพ์ชุดกู้คืน",
+  },
+  "recovery_kit_modal.download_success": {
+    en: "Recovery kit downloaded",
+    th: "ดาวน์โหลดชุดกู้คืนแล้ว",
   },
   "recovery_kit_modal.action.copied": {
     en: "Copied",
@@ -3907,16 +3940,8 @@ export const translations: Dict = {
     th: "คลิปบอร์ดจะถูกล้างอัตโนมัติใน {seconds} วินาที เพื่อความปลอดภัยของ Recovery Code",
   },
   "recovery_kit_modal.download_confirm.body": {
-    en: "Saved as plain text. If your downloads folder syncs to iCloud, Google Drive, OneDrive, or another cloud service, the recovery code will be uploaded automatically — printing or copying is more secure.",
-    th: "ไฟล์ถูกบันทึกเป็น Plain Text หากโฟลเดอร์ดาวน์โหลดของคุณ sync กับ iCloud, Google Drive, OneDrive หรือคลาวด์อื่น Recovery Code จะถูกอัปโหลดอัตโนมัติ — การพิมพ์หรือคัดลอกจะปลอดภัยกว่า",
-  },
-  "recovery_kit_modal.action.download": {
-    en: "Download as .txt",
-    th: "ดาวน์โหลดเป็น .txt",
-  },
-  "recovery_kit_modal.action.print": {
-    en: "Print",
-    th: "พิมพ์",
+    en: "If your downloads folder syncs to iCloud, Google Drive, OneDrive, or another cloud service, the recovery mnemonic will be uploaded automatically — printing or offline storage is more secure.",
+    th: "หากโฟลเดอร์ดาวน์โหลดของคุณซิงค์กับ iCloud, Google Drive, OneDrive หรือคลาวด์อื่น ชุดคำศัพท์นี้จะถูกอัปโหลดอัตโนมัติ — การพิมพ์หรือบันทึกแบบออฟไลน์จะปลอดภัยกว่า",
   },
   "recovery_kit_modal.action.continue": {
     en: "Continue",
@@ -3983,28 +4008,32 @@ export const translations: Dict = {
 
   /* ---- /forgot-password page ---- */
   "forgot_password.title": {
-    en: "Reset your master password",
-    th: "รีเซ็ต Master Password",
+    en: "Recover Your Account",
+    th: "กู้คืนบัญชีของคุณ",
   },
   "forgot_password.subtitle": {
-    en: "Enter your email, paste your recovery code, and choose a new master password. All existing sessions will be signed out.",
-    th: "กรอกอีเมล วาง Recovery Code และตั้ง Master Password ใหม่ เซสชันทั้งหมดจะถูกออกจากระบบ",
+    en: "Enter your email, paste your 24-word recovery mnemonic, and choose a new master password. All existing sessions will be signed out.",
+    th: "กรอกอีเมล วางชุดคำศัพท์กู้คืน 24 คำ และตั้งรหัสผ่านมาสเตอร์ใหม่ เซสชันทั้งหมดจะถูกออกจากระบบ",
   },
   "forgot_password.email_label": {
-    en: "Email",
-    th: "อีเมล",
+    en: "Email Address",
+    th: "ที่อยู่อีเมล",
   },
   "forgot_password.code_label": {
-    en: "Recovery code",
-    th: "Recovery code",
+    en: "Recovery Mnemonic",
+    th: "ชุดคำศัพท์กู้คืน",
   },
-  "forgot_password.code_placeholder": {
-    en: "Paste your recovery code (xxxx-xxxx-…)",
-    th: "วาง Recovery Code (xxxx-xxxx-…)",
+  "forgot_password.mnemonic_placeholder": {
+    en: "Enter your 24 words separated by spaces (apple banana cherry…)",
+    th: "กรอกคำศัพท์ 24 คำ เว้นวรรคทีละคำ (apple banana cherry…)",
+  },
+  "forgot_password.mnemonic_hint": {
+    en: "Normalization will handle extra spaces or newlines automatically.",
+    th: "ระบบจะปรับรูปแบบเว้นวรรคให้ถูกต้องโดยอัตโนมัติ",
   },
   "forgot_password.new_password_label": {
-    en: "New master password",
-    th: "Master Password ใหม่",
+    en: "New Master Password",
+    th: "รหัสผ่านมาสเตอร์ใหม่",
   },
   "forgot_password.confirm_label": {
     en: "Confirm new master password",

@@ -121,20 +121,36 @@ export async function deleteItem(id: string): Promise<void> {
   });
 }
 
+/** Result envelope for POST /items/bulk — 200 even on partial/total failure. */
+export interface BulkItemsResult {
+  success: string[];
+  failed: { id: string; reason: string }[];
+}
+
 /**
- * POST /items/bulk — execute a batch action (delete, move, share) on multiple items.
- * returns a report of success vs failed item IDs.
+ * Payload for the bulk "share" action. Grants `role` to exactly one principal —
+ * either `userId` OR `teamId`, never both — across every selected item. The
+ * backend skips items the caller can't share (reason `forbidden`) and reports
+ * them in `failed` rather than aborting the whole batch (AC-052.5).
+ */
+export interface BulkSharePayload {
+  role: "manager" | "editor" | "user" | "viewer";
+  userId?: string;
+  teamId?: string;
+}
+
+/**
+ * POST /items/bulk — execute a batch action (delete, move, share) on multiple
+ * items. Always resolves with a `{ success, failed }` report (200) even when
+ * some or all items fail; only a transport/auth error throws.
  */
 export async function bulkItems(
   action: "delete" | "move" | "share",
   itemIds: string[],
-  payload?: { folderId?: string | null; vaultId?: string },
-): Promise<{ success: string[]; failed: { id: string; reason: string }[] }> {
-  return apiFetch<{ success: string[]; failed: { id: string; reason: string }[] }>(
-    "/items/bulk",
-    {
-      method: "POST",
-      body: JSON.stringify({ action, itemIds, payload }),
-    },
-  );
+  payload?: { folderId?: string | null; vaultId?: string } | BulkSharePayload,
+): Promise<BulkItemsResult> {
+  return apiFetch<BulkItemsResult>("/items/bulk", {
+    method: "POST",
+    body: { action, itemIds, payload },
+  });
 }
