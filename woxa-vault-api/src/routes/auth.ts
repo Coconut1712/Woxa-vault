@@ -541,6 +541,15 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
         await tx
           .update(users)
           .set({
+            // FINDING 2: /forgot-password is the PUBLIC "I can't log in"
+            // recovery surface — the UX forwards to /login/password and
+            // expects the new password to work for login. `POST /auth/login`
+            // verifies `login_password_hash` (auth.ts:117/149), so we MUST
+            // rotate it. We rotate `password_hash` (master) too so the chosen
+            // password works for both login AND vault-unlock — a single fresh
+            // credential, no split-brain where login works but unlock uses a
+            // stale master. (Two-password model: schema.ts:68/73.)
+            loginPasswordHash: newHash,
             passwordHash: newHash,
             passwordUpdatedAt: now,
             recoveryKitHash: null,

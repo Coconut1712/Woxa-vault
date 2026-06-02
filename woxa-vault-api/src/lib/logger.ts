@@ -51,6 +51,10 @@ const REDACT_PATHS = [
   '*.encryptedPrivateKey',
   '*.privateKeyIv',
   '*.privateKeyAuthTag',
+  // Integration webhook URLs (Slack/Google) embed a bearer-equivalent secret
+  // token in the path — treat like a credential.
+  '*.webhookUrl',
+  'req.body.webhookUrl',
 ];
 
 export const logger = pino({

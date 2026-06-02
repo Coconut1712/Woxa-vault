@@ -18,6 +18,8 @@ import { rateLimit } from "@/lib/rateLimit";
 import { jsonValidator, paramValidator } from "@/lib/validator";
 import {
   requireAuth,
+  requireTwoFactorEnrolled,
+  blockGuestWrites,
   activeOrgForContext,
   type AuthVariables,
 } from "@/middleware/auth";
@@ -53,7 +55,16 @@ interface TeamMemberDTO {
 }
 
 export const teamRoutes = new Hono<{ Variables: AuthVariables }>()
+  // FINDING 4: teams are a secret-bearing access surface (team membership grants
+  // vault/folder/item access via the *team_members tables). Mirror the
+  // vaults.ts/items.ts router chain: enforce 2FA enrollment + read-only guests.
+  // `requireTwoFactorEnrolled` gates all verbs (consistent with vaults.ts) and
+  // does not interfere with the 2FA enroll flow, which uses /me + /auth/2fa.
+  // `blockGuestWrites` is method-scoped (GET/HEAD/OPTIONS pass), so team
+  // listings stay readable while mutations are blocked for guests/auditors.
   .use("*", requireAuth)
+  .use("*", requireTwoFactorEnrolled)
+  .use("*", blockGuestWrites)
 
   // ------------------------------------------------------------------
   // List teams in the active workspace

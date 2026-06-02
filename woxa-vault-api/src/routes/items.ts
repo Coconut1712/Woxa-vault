@@ -1,13 +1,16 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import {
   auditEvents,
   folderMembers,
   folders,
   itemMembers,
+  itemTeamMembers,
   items,
+  teamMembers,
+  teams,
   users,
   vaults,
   type Item,
@@ -25,6 +28,7 @@ import {
 } from "@/lib/itemCrypto";
 import { jsonValidator, paramValidator } from "@/lib/validator";
 import {
+  activeOrgForContext,
   blockGuestWrites,
   requireAuth,
   requireTwoFactorEnrolled,
@@ -37,11 +41,15 @@ import {
   type Role,
 } from "@/routes/vaults";
 import {
+  canGrantRole,
   canRevealItem,
   resolveFolderRole,
   resolveItemRole,
+  shareAuthorityForItem,
   type Role as AccessRole,
 } from "@/lib/access";
+import { getOrgMembership } from "@/lib/orgAccess";
+import { createNotification } from "@/lib/notifications";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -88,14 +96,44 @@ const patchSchema = z.object({
   notesIv: z.string().optional(),
 });
 
-const bulkSchema = z.object({
-  action: z.enum(["delete", "move", "share"]),
-  itemIds: z.array(z.string().uuid()).min(1).max(100),
-  payload: z.object({
-    folderId: z.string().uuid().nullable().optional(),
-    vaultId: z.string().uuid().optional(), // For future cross-vault move
-  }).optional(),
-});
+const bulkRoleSchema = z.enum(["manager", "editor", "user", "viewer"]);
+
+const bulkSchema = z
+  .object({
+    action: z.enum(["delete", "move", "share"]),
+    itemIds: z.array(z.string().uuid()).min(1).max(100),
+    payload: z
+      .object({
+        folderId: z.string().uuid().nullable().optional(),
+        vaultId: z.string().uuid().optional(), // For future cross-vault move
+        // Share principal — mirrors single-share (itemMembers.ts). Exactly ONE
+        // of userId / teamId must be present, validated by superRefine below.
+        userId: z.string().uuid().optional(),
+        teamId: z.string().uuid().optional(),
+        role: bulkRoleSchema.optional(),
+      })
+      .optional(),
+  })
+  // Per-action payload shape. `move` needs nothing mandatory (folderId may be
+  // null = move to root); `share` REQUIRES role + exactly one principal so the
+  // bulk path can never grant with a missing/ambiguous target.
+  .superRefine((val, ctx) => {
+    if (val.action !== "share") return;
+    const p = val.payload;
+    if (!p || !p.role) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "share requires payload.role", path: ["payload", "role"] });
+      return;
+    }
+    const hasUser = !!p.userId;
+    const hasTeam = !!p.teamId;
+    if (hasUser === hasTeam) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "share requires exactly one of payload.userId or payload.teamId",
+        path: ["payload"],
+      });
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // Serialization
@@ -294,31 +332,61 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     const summary = toSummary(access.item, creator);
     summary.effectiveRole = access.role;
 
+    const ipHashStr = hashIp(getClientIp(c));
+    const ua = c.req.header("user-agent") ?? null;
+
+    // Debounce audit log for 10 seconds to prevent noisy React double-fetches
+    const recentAudit = await db.query.auditEvents.findFirst({
+      where: and(
+        eq(auditEvents.action, "item.view"),
+        eq(auditEvents.targetId, access.item.id),
+        eq(auditEvents.actorUserId, user.id),
+        eq(auditEvents.ipHash, ipHashStr),
+        sql`${auditEvents.occurredAt} >= now() - interval '10 seconds'`
+      ),
+    });
+
+    const recordAudit = async (version: number) => {
+      if (!recentAudit) {
+        await db.insert(auditEvents).values({
+          orgId: access.vault.orgId,
+          actorUserId: user.id,
+          actorEmail: user.email,
+          action: "item.view",
+          targetType: "item",
+          targetId: access.item.id,
+          targetName: access.item.name,
+          ipHash: ipHashStr,
+          userAgent: ua,
+          success: true,
+          metadata: { encryptionVersion: version },
+        });
+      }
+    };
+
+    const activeOrg = await activeOrgForContext(c);
+    const isAuditor = activeOrg?.role === "auditor";
+    // notes are SECRET-equivalent: gate them with the same capability used for
+    // the password reveal (access.ts:65 canRevealItem). A vault `viewer` is
+    // metadata-only — they keep name/tags/timestamps (summary) but get
+    // notes withheld (null). Auditor is org-wide read-only → never decrypts.
+    const canReveal = canRevealItem(access.role) && !isAuditor;
+
     // Phase C: If ZK, return encrypted fields
     if (access.vault.encryptionVersion === 2) {
       const full = {
         ...summary,
         password: null,
         notes: null,
-        notesCiphertext: access.item.notesCiphertext?.toString("base64"),
-        notesIv: access.item.notesIv?.toString("base64"),
+        notesCiphertext: canReveal
+          ? access.item.notesCiphertext?.toString("base64")
+          : null,
+        notesIv: canReveal ? access.item.notesIv?.toString("base64") : null,
         totpSecret: null,
         customFields: [],
       };
 
-      await db.insert(auditEvents).values({
-        orgId: access.vault.orgId,
-        actorUserId: user.id,
-        actorEmail: user.email,
-        action: "item.view",
-        targetType: "item",
-        targetId: access.item.id,
-        targetName: access.item.name,
-        ipHash: hashIp(getClientIp(c)),
-        userAgent: c.req.header("user-agent") ?? null,
-        success: true,
-        metadata: { encryptionVersion: 2 },
-      });
+      await recordAudit(2);
 
       return c.json({ item: full });
     }
@@ -327,7 +395,7 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     let dek: Buffer | null = null;
     try {
       const notes =
-        access.item.notesCiphertext && access.item.notesIv
+        canReveal && access.item.notesCiphertext && access.item.notesIv
           ? (() => {
               dek = unwrapDek({
                 dekCiphertext: access.item.dekCiphertext!,
@@ -345,19 +413,7 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
         customFields: [],
       };
 
-      await db.insert(auditEvents).values({
-        orgId: access.vault.orgId,
-        actorUserId: user.id,
-        actorEmail: user.email,
-        action: "item.view",
-        targetType: "item",
-        targetId: access.item.id,
-        targetName: access.item.name,
-        ipHash: hashIp(getClientIp(c)),
-        userAgent: c.req.header("user-agent") ?? null,
-        success: true,
-        metadata: { encryptionVersion: 1 },
-      });
+      await recordAudit(1);
 
       return c.json({ item: full });
     } finally {
@@ -504,6 +560,14 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
       failed: [] as { id: string; reason: string }[],
     };
 
+    // Share principal is the SAME for every item in the batch. Resolve the
+    // grantee's identity ONCE here; per-item we only re-check authority and
+    // org-scoping (the principal must belong to each item's org). For `share`,
+    // the Zod superRefine guarantees role + exactly one of userId/teamId.
+    const shareRole = action === "share" ? (payload!.role as AccessRole) : null;
+    const granteeUserId = action === "share" ? (payload!.userId ?? null) : null;
+    const granteeTeamId = action === "share" ? (payload!.teamId ?? null) : null;
+
     await db.transaction(async (tx) => {
       for (const id of itemIds) {
         try {
@@ -513,6 +577,127 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
             continue;
           }
 
+          if (action === "share") {
+            // Authority is per-item: effective item role OR creator floor
+            // (mirrors itemMembers.loadItemContext + shareAuthorityForItem).
+            // canManageItem is NOT the right gate here — a vault `user` who
+            // CREATED the item may share up to editor even though they can't
+            // manage the item generally.
+            const isCreator = access.item.createdBy === user.id;
+            const authority = shareAuthorityForItem(access.role as AccessRole, isCreator);
+
+            // No escalation: granted role must be <= caller's authority, and
+            // the caller must have at least editor-level share authority. A
+            // caller lacking share rights on THIS item → forbidden (skip), not
+            // a thrown 4xx for the whole batch (AC-052.5 partial success).
+            if (!canGrantRole(authority, shareRole!)) {
+              results.failed.push({ id, reason: "forbidden" });
+              continue;
+            }
+
+            // Grantee must belong to THIS item's org (cross-org block).
+            if (granteeUserId) {
+              const targetMembership = await getOrgMembership(access.vault.orgId, granteeUserId);
+              if (!targetMembership) {
+                results.failed.push({ id, reason: "user_not_in_workspace" });
+                continue;
+              }
+
+              // Idempotent upsert. Mirrors single-share semantics: a PLAIN
+              // permanent grant (no originalRole / expiresAt — those belong to
+              // the temp-grant / access-request path). onConflict updates the
+              // role only, never touching originalRole, so a pre-existing temp
+              // grant's baseline is preserved (avoids the originalRole-overwrite
+              // bug fixed in accessRequests.ts).
+              await tx
+                .insert(itemMembers)
+                .values({ itemId: id, userId: granteeUserId, role: shareRole! })
+                .onConflictDoUpdate({
+                  target: [itemMembers.itemId, itemMembers.userId],
+                  set: { role: shareRole! },
+                });
+
+              const grantee = await tx.query.users.findFirst({ where: eq(users.id, granteeUserId) });
+              await tx.insert(auditEvents).values({
+                orgId: access.vault.orgId,
+                actorUserId: user.id,
+                actorEmail: user.email,
+                action: "item.share",
+                targetType: "item",
+                targetId: id,
+                targetName: access.item.name,
+                ipHash: hashIp(getClientIp(c)),
+                userAgent: c.req.header("user-agent") ?? null,
+                success: true,
+                metadata: { bulk: true, granteeUserId, granteeEmail: grantee?.email ?? null, role: shareRole },
+              });
+              await createNotification(tx, {
+                userId: granteeUserId,
+                orgId: access.vault.orgId,
+                type: "share.received",
+                actorUserId: user.id,
+                actorEmail: user.email,
+                targetType: "item",
+                targetId: id,
+                targetName: access.item.name,
+                metadata: { resourceKind: "item", role: shareRole!, bulk: true },
+              });
+            } else {
+              // Team grant. Team must belong to THIS item's org.
+              const team = await tx.query.teams.findFirst({
+                where: and(eq(teams.id, granteeTeamId!), eq(teams.orgId, access.vault.orgId)),
+              });
+              if (!team) {
+                results.failed.push({ id, reason: "team_not_in_workspace" });
+                continue;
+              }
+
+              await tx
+                .insert(itemTeamMembers)
+                .values({ itemId: id, teamId: granteeTeamId!, role: shareRole! })
+                .onConflictDoUpdate({
+                  target: [itemTeamMembers.itemId, itemTeamMembers.teamId],
+                  set: { role: shareRole! },
+                });
+
+              await tx.insert(auditEvents).values({
+                orgId: access.vault.orgId,
+                actorUserId: user.id,
+                actorEmail: user.email,
+                action: "item.team_share",
+                targetType: "item",
+                targetId: id,
+                targetName: access.item.name,
+                ipHash: hashIp(getClientIp(c)),
+                userAgent: c.req.header("user-agent") ?? null,
+                success: true,
+                metadata: { bulk: true, granteeTeamId, granteeTeamName: team.name, role: shareRole },
+              });
+
+              const members = await tx
+                .select({ userId: teamMembers.userId })
+                .from(teamMembers)
+                .where(eq(teamMembers.teamId, granteeTeamId!));
+              for (const m of members) {
+                await createNotification(tx, {
+                  userId: m.userId,
+                  orgId: access.vault.orgId,
+                  type: "share.received",
+                  actorUserId: user.id,
+                  actorEmail: user.email,
+                  targetType: "item",
+                  targetId: id,
+                  targetName: access.item.name,
+                  metadata: { resourceKind: "item", role: shareRole!, viaTeamId: granteeTeamId!, viaTeamName: team.name, bulk: true },
+                });
+              }
+            }
+
+            results.success.push(id);
+            continue;
+          }
+
+          // delete / move require general item-management authority.
           if (!canManageItem(access.role)) {
             results.failed.push({ id, reason: "forbidden" });
             continue;
@@ -657,19 +842,6 @@ export const vaultItemRoutes = new Hono<{
       summary.effectiveRole = role;
       out.push(summary);
     }
-
-    await db.insert(auditEvents).values({
-      orgId: viewer.vault.orgId,
-      actorUserId: user.id,
-      actorEmail: user.email,
-      action: "vault.items_viewed",
-      targetType: "vault",
-      targetId: id,
-      targetName: viewer.vault.name,
-      ipHash: hashIp(getClientIp(c)),
-      userAgent: c.req.header("user-agent") ?? null,
-      success: true,
-    });
 
     return c.json({ items: out });
   })

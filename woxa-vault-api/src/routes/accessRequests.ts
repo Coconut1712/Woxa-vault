@@ -48,6 +48,9 @@ export const accessRequestRoutes = new Hono<{ Variables: AuthVariables }>()
     const user = c.get("user")!;
     const activeOrg = await activeOrgForContext(c);
     if (!activeOrg) throw errors.notFound("Workspace not found");
+    if (activeOrg.role === "auditor") {
+      throw errors.forbidden("Auditors are restricted to metadata only and cannot request secret access.");
+    }
 
     const input = c.req.valid("json");
 
@@ -165,9 +168,9 @@ export const accessRequestRoutes = new Hono<{ Variables: AuthVariables }>()
     const activeOrg = await activeOrgForContext(c);
     if (!activeOrg) throw errors.notFound("Workspace not found");
 
-    // Approvers (managers/admins) see all pending requests in the org.
+    // Approvers (managers/admins) and Auditors see all requests in the org.
     // Requesters see their own requests.
-    const isApprover = activeOrg.role === "owner" || activeOrg.role === "admin";
+    const canViewAll = activeOrg.role === "owner" || activeOrg.role === "admin" || activeOrg.role === "auditor";
 
     const rows = await db
       .select({
@@ -181,9 +184,9 @@ export const accessRequestRoutes = new Hono<{ Variables: AuthVariables }>()
       .where(
         and(
           eq(accessRequests.orgId, activeOrg.orgId),
-          isApprover 
-            ? sql`1=1` // Approvers see all
-            : eq(accessRequests.requesterId, user.id) // Requesters see only their own
+          canViewAll 
+            ? sql`1=1` // Admins/Auditors see all
+            : eq(accessRequests.requesterId, user.id) // Regular members see only their own
         )
       )
       .orderBy(desc(accessRequests.createdAt))
@@ -222,6 +225,7 @@ export const accessRequestRoutes = new Hono<{ Variables: AuthVariables }>()
     const { id } = c.req.valid("param");
     const input = c.req.valid("json");
 
+    // Only owners and admins can approve/deny. Auditors are read-only.
     if (activeOrg.role !== "owner" && activeOrg.role !== "admin") {
       throw errors.forbidden("Only workspace admins may decide on access requests");
     }
@@ -263,11 +267,17 @@ export const accessRequestRoutes = new Hono<{ Variables: AuthVariables }>()
 
         if (request.targetType === "item") {
           const [existing] = await tx
-            .select({ role: itemMembers.role })
+            .select({ role: itemMembers.role, originalRole: itemMembers.originalRole })
             .from(itemMembers)
             .where(and(eq(itemMembers.itemId, request.targetId), eq(itemMembers.userId, request.requesterId)))
             .limit(1);
-          originalRole = existing?.role ?? null;
+          // FINDING 3: if the requester ALREADY holds a temp (elevated) grant,
+          // its `role` is the elevated value and `originalRole` is the true
+          // baseline to revert to. Re-approving must NOT promote `originalRole`
+          // to the elevated role, or expiry/sweeper would revert to the
+          // elevated role and make the temporary grant permanent. Keep the
+          // existing baseline when present.
+          originalRole = existing?.originalRole ?? existing?.role ?? null;
 
           await tx
             .insert(itemMembers)
@@ -288,11 +298,13 @@ export const accessRequestRoutes = new Hono<{ Variables: AuthVariables }>()
             });
         } else if (request.targetType === "vault") {
           const [existing] = await tx
-            .select({ role: vaultMembers.role })
+            .select({ role: vaultMembers.role, originalRole: vaultMembers.originalRole })
             .from(vaultMembers)
             .where(and(eq(vaultMembers.vaultId, request.targetId), eq(vaultMembers.userId, request.requesterId)))
             .limit(1);
-          originalRole = existing?.role ?? null;
+          // FINDING 3: preserve the true baseline of an existing temp grant
+          // (see item branch above).
+          originalRole = existing?.originalRole ?? existing?.role ?? null;
 
           await tx
             .insert(vaultMembers)
