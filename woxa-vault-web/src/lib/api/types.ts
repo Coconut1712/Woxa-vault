@@ -69,8 +69,6 @@ export interface VaultDetail {
   vault: Vault;
   members: VaultMember[];
   wrappedKey?: string | null;
-}
-
   teamMembers: VaultTeamMember[];
 }
 

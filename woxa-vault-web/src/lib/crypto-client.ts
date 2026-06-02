@@ -14,6 +14,19 @@ import nacl from "tweetnacl";
  * 4. Vault Key -> AES-GCM -> Encrypts Item Data
  */
 
+/**
+ * Re-backs a Uint8Array onto a guaranteed `ArrayBuffer` so it satisfies the
+ * Web Crypto `BufferSource` type (`ArrayBufferView<ArrayBuffer>`). Values here
+ * are always plain-ArrayBuffer-backed at runtime (created via `new Uint8Array`,
+ * `getRandomValues`, `argon2id`, or `nacl`); the copy only enforces what the
+ * lib.dom types can't infer from the generic `Uint8Array<ArrayBufferLike>`.
+ */
+function bufferSource(view: Uint8Array): Uint8Array<ArrayBuffer> {
+  const copy = new Uint8Array(view.length);
+  copy.set(view);
+  return copy;
+}
+
 // Argon2id parameters (aligned with DESIGN.md §6.1)
 const ARGON_PARAMS = {
   iterations: 3,
@@ -70,7 +83,7 @@ export async function encryptPrivateKey(privateKey: Uint8Array, masterKey: Uint8
   const iv = window.crypto.getRandomValues(new Uint8Array(12));
   const cryptoKey = await window.crypto.subtle.importKey(
     "raw",
-    masterKey,
+    bufferSource(masterKey),
     "AES-GCM",
     false,
     ["encrypt"]
@@ -79,7 +92,7 @@ export async function encryptPrivateKey(privateKey: Uint8Array, masterKey: Uint8
   const ciphertext = await window.crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
     cryptoKey,
-    privateKey
+    bufferSource(privateKey)
   );
 
   const combined = new Uint8Array(ciphertext);
@@ -98,7 +111,7 @@ export async function decryptPrivateKey(
 ): Promise<Uint8Array> {
   const cryptoKey = await window.crypto.subtle.importKey(
     "raw",
-    masterKey,
+    bufferSource(masterKey),
     "AES-GCM",
     false,
     ["decrypt"]
@@ -109,9 +122,9 @@ export async function decryptPrivateKey(
   combined.set(encrypted.authTag, encrypted.ciphertext.length);
 
   const decrypted = await window.crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: encrypted.iv },
+    { name: "AES-GCM", iv: bufferSource(encrypted.iv) },
     cryptoKey,
-    combined
+    bufferSource(combined)
   );
 
   return new Uint8Array(decrypted);
@@ -126,7 +139,7 @@ export async function encryptData(plaintext: string, key: Uint8Array) {
   
   const cryptoKey = await window.crypto.subtle.importKey(
     "raw",
-    key,
+    bufferSource(key),
     "AES-GCM",
     false,
     ["encrypt"]
@@ -135,7 +148,7 @@ export async function encryptData(plaintext: string, key: Uint8Array) {
   const ciphertext = await window.crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
     cryptoKey,
-    data
+    bufferSource(data)
   );
 
   const combined = new Uint8Array(ciphertext);
@@ -155,7 +168,7 @@ export async function decryptData(
 ): Promise<string> {
   const cryptoKey = await window.crypto.subtle.importKey(
     "raw",
-    key,
+    bufferSource(key),
     "AES-GCM",
     false,
     ["decrypt"]
@@ -166,9 +179,9 @@ export async function decryptData(
   combined.set(encrypted.authTag, encrypted.ciphertext.length);
 
   const decrypted = await window.crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: encrypted.iv },
+    { name: "AES-GCM", iv: bufferSource(encrypted.iv) },
     cryptoKey,
-    combined
+    bufferSource(combined)
   );
 
   return new TextDecoder().decode(decrypted);
@@ -186,8 +199,8 @@ export async function wrapVaultKey(vaultKey: Uint8Array, recipientPublicKey: Uin
   const sharedSecret = nacl.scalarMult(ephemeral.secretKey, recipientPublicKey);
   
   // 3. Derive a symmetric key from shared secret using SHA-256
-  const derivationKey = await window.crypto.subtle.digest("SHA-256", sharedSecret);
-  
+  const derivationKey = await window.crypto.subtle.digest("SHA-256", bufferSource(sharedSecret));
+
   // 4. Encrypt vault key with derivation key
   const iv = window.crypto.getRandomValues(new Uint8Array(12));
   const cryptoKey = await window.crypto.subtle.importKey(
@@ -201,7 +214,7 @@ export async function wrapVaultKey(vaultKey: Uint8Array, recipientPublicKey: Uin
   const ciphertext = await window.crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
     cryptoKey,
-    vaultKey
+    bufferSource(vaultKey)
   );
 
   const combined = new Uint8Array(ciphertext);
@@ -225,8 +238,8 @@ export async function unwrapVaultKey(
   const sharedSecret = nacl.scalarMult(userPrivateKey, wrapped.ephemeralPublicKey);
   
   // 2. Derive the symmetric key
-  const derivationKey = await window.crypto.subtle.digest("SHA-256", sharedSecret);
-  
+  const derivationKey = await window.crypto.subtle.digest("SHA-256", bufferSource(sharedSecret));
+
   // 3. Decrypt vault key
   const cryptoKey = await window.crypto.subtle.importKey(
     "raw",
@@ -241,9 +254,9 @@ export async function unwrapVaultKey(
   combined.set(wrapped.authTag, wrapped.ciphertext.length);
 
   const decrypted = await window.crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: wrapped.iv },
+    { name: "AES-GCM", iv: bufferSource(wrapped.iv) },
     cryptoKey,
-    combined
+    bufferSource(combined)
   );
 
   return new Uint8Array(decrypted);

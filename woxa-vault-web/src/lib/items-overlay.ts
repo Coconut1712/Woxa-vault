@@ -20,12 +20,14 @@ import {
   updateItem as apiUpdate,
   deleteItem as apiDelete,
 } from "@/lib/api/items";
+import { listItemMembers as apiListMembers } from "@/lib/api/grants";
 import type {
   ItemCreateInput,
   ItemFull,
   ItemSummary,
   ItemUpdateInput,
   VaultRole,
+  VaultMember,
 } from "@/lib/api/types";
 import {
   DEFAULT_META,
@@ -267,7 +269,7 @@ export async function createDisplayItem(
   // For api_key/ssh we route the primary secret into the password column so
   // it inherits the existing reveal/audit path. Other types' secrets live in
   // the encrypted notes meta.
-  let wirePassword: string | null = input.password ?? null;
+  const wirePassword: string | null = input.password ?? null;
   const wireType = wireTypeFor(input.displayKind);
   const userNotes = (input.notes ?? "").trim();
   const wireNotes = encodeMeta(meta, userNotes);
@@ -405,8 +407,11 @@ export async function updateDisplayItem(
     // Phase C: ZK encryption
     if (wirePassword !== undefined) {
       if (wirePassword === null) {
-        patch.passwordCiphertext = null;
-        patch.passwordIv = null;
+        // Backend treats a falsy (empty-string) ciphertext as "clear the
+        // password" — see PATCH /items/:id (`body.passwordCiphertext ? ... : null`).
+        // The wire type is `string`, so send "" rather than null.
+        patch.passwordCiphertext = "";
+        patch.passwordIv = "";
       } else {
         const enc = await encryptData(wirePassword, vaultKey);
         const combined = new Uint8Array(enc.ciphertext.length + enc.authTag.length);
@@ -477,6 +482,16 @@ export async function deleteDisplayItem(id: string): Promise<void> {
   deleteSummaryMeta(id);
 }
 
+/** Wrapper for item member list. */
+export async function getDisplayItemMembers(
+  itemId: string,
+  signal?: AbortSignal,
+): Promise<{ members: VaultMember[] }> {
+  // `listItemMembers` already unwraps the response to a bare array; re-wrap so
+  // the consumer-facing shape (`{ members }`) stays stable.
+  return { members: await apiListMembers(itemId, signal) };
+}
+
 /**
  * Re-base a display item's `displayEffectiveRole` to the vault role when the
  * wire omitted an item-level `effectiveRole`. `decorateSummary` defaults the
@@ -493,4 +508,4 @@ export function withVaultRole<T extends DisplayItemSummary>(
 
 /* Re-exports for convenience */
 export { emptyMeta };
-export type { CustomField, ItemMeta };
+export type { CustomField, ItemMeta, VaultMember };

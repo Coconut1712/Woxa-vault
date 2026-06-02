@@ -46,7 +46,7 @@ export default function ImportPage() {
   const t = useT();
   const router = useRouter();
   const { vaults } = useVaults();
-  const { folders } = useFolders();
+  const { byVault: foldersByVault } = useFolders();
 
   const [step, setStep] = useState<Step>("source");
   const [source, setSource] = useState<string>("");
@@ -243,7 +243,7 @@ export default function ImportPage() {
                     <label className="text-sm font-medium">{t("import.config.vault")}</label>
                     <Select 
                       value={config.targetVaultId} 
-                      onValueChange={(v) => setConfig(prev => ({ ...prev, targetVaultId: v }))}
+                      onValueChange={(v) => setConfig(prev => ({ ...prev, targetVaultId: v ?? "" }))}
                     >
                       <SelectTrigger>
                         <SelectValue />
@@ -267,7 +267,7 @@ export default function ImportPage() {
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="none">None</SelectItem>
-                        {folders.filter(f => f.vaultId === config.targetVaultId).map(f => (
+                        {foldersByVault(config.targetVaultId).map(f => (
                           <SelectItem key={f.id} value={f.id}>{f.name}</SelectItem>
                         ))}
                       </SelectContent>

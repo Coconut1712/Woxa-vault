@@ -33,7 +33,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ApiError } from "@/lib/api/client";
-import { getItem, getItemPassword } from "@/lib/api/items";
+import { getItem } from "@/lib/api/items";
+import { getItemPassword } from "@/lib/items-overlay";
 import { createSend } from "@/lib/api/sends";
 import type { ItemFull } from "@/lib/api/types";
 import { useT } from "@/lib/i18n/provider";
