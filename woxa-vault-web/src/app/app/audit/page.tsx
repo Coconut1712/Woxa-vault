@@ -313,7 +313,9 @@ export default function AuditPage() {
       )
       .join("\n");
 
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    // Prepend a UTF-8 BOM (AC-040.5) so Excel decodes Thai text correctly
+    // instead of mojibake when opening the exported CSV.
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     const stamp = format(new Date(), "yyyy-MM-dd-HHmm");

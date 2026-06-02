@@ -36,7 +36,7 @@
 
 import type { ItemSummary, ItemFull, ItemType as ApiItemType } from "@/lib/api/types";
 
-/** Mockup-era item types — only `login` and `note` round-trip to the wire. */
+/** Item types — all six now round-trip verbatim to the wire (FR-030). */
 export type DisplayKind =
   | "login"
   | "note"
@@ -125,9 +125,18 @@ export function decodeMeta(
 
   try {
     const raw = JSON.parse(firstLine.slice(META_SENTINEL.length)) as Partial<ItemMeta>;
+    // displayKind precedence (FR-030): the server `type` column now persists all
+    // six kinds verbatim. When the server already reports a rich type
+    // (card/ssh/api_key/identity), it is authoritative — trust it over a stale
+    // meta header left by a collapsed-era (login/note-only) write. Only when the
+    // server type is the collapsible login/note do we fall back to the richer
+    // `displayKind` the overlay stashed, so un-migrated legacy items still render
+    // as the kind the user picked.
+    const serverIsRich = wireType !== "login" && wireType !== "note";
+    const displayKind = serverIsRich ? wireType : raw.displayKind ?? wireType;
     return {
       meta: {
-        displayKind: raw.displayKind ?? wireType,
+        displayKind,
         folderId: raw.folderId ?? null,
         tags: Array.isArray(raw.tags) ? raw.tags : [],
         favorite: Boolean(raw.favorite),
@@ -169,22 +178,19 @@ export function encodeMeta(meta: ItemMeta, userNotes: string): string {
 }
 
 /**
- * Round-2 wire type for a given display kind.
+ * Wire type for a given display kind.
  *
- * `login` / `api_key` / `ssh` have a primary secret that maps cleanly to the
- * password column. Everything else (note / card / identity) goes to `note`.
+ * The backend now persists all six item types verbatim (FR-030), so the wire
+ * type IS the display kind. The encrypted-notes meta overlay still carries the
+ * richer per-type secrets (card/ssh/identity blobs, totp, custom fields), but
+ * the plaintext `type` column is now first-class for every kind.
+ *
+ * `DisplayKind` and the backend `ItemType` are the same six-member union, so
+ * this is an identity map kept as a function for call-site stability and to
+ * give us one seam if the two unions ever diverge again.
  */
 export function wireTypeFor(displayKind: DisplayKind): ApiItemType {
-  switch (displayKind) {
-    case "login":
-    case "api_key":
-    case "ssh":
-      return "login";
-    case "note":
-    case "card":
-    case "identity":
-      return "note";
-  }
+  return displayKind;
 }
 
 /**

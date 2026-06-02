@@ -115,8 +115,8 @@ export interface FolderUpdateInput {
   position?: number;
 }
 
-/** Round 2 item types — contract reserves the rest. */
-export type ItemType = "login" | "note";
+/** Item types — backend persists all six verbatim (FR-030). */
+export type ItemType = "login" | "note" | "api_key" | "ssh" | "card" | "identity";
 
 export interface ItemActor {
   id: string;
@@ -144,6 +144,13 @@ export interface ItemSummary {
   createdAt: string;
   updatedAt: string;
   lastUsedAt: string | null;
+  /**
+   * When the item's password ciphertext last changed (ISO), or null if the item
+   * has never had a password (e.g. a secure note). Backend sets it to `now` and
+   * snapshots a version ONLY when a PATCH carries a non-empty `password` /
+   * `passwordCiphertext` (US-015 / FR-037).
+   */
+  passwordChangedAt: string | null;
   createdBy: ItemActor;
   /**
    * The caller's effective role on THIS item — "most specific wins":
@@ -196,7 +203,62 @@ export interface ItemCreateInput {
   folderId?: string | null;
 }
 
-export type ItemUpdateInput = Partial<Omit<ItemCreateInput, "type">>;
+/**
+ * PATCH /items/:id body. `type` is optional: the backend accepts an item
+ * type-change (FR-030, all six types persist verbatim). Omit it to leave the
+ * type untouched; send it only when the user actually switches the item kind.
+ */
+export type ItemUpdateInput = Partial<ItemCreateInput>;
+
+/**
+ * One row of an item's password version history (US-015 / FR-037). Metadata
+ * only — never carries secret content. Returned by GET /items/:id/versions,
+ * newest first, capped at the 10 most recent.
+ */
+export interface ItemVersionSummary {
+  version: number;
+  type: ItemType;
+  name: string;
+  editedByEmail: string;
+  createdAt: string;
+  hasPassword: boolean;
+  hasNotes: boolean;
+}
+
+/** Envelope for GET /items/:id/versions. */
+export interface ItemVersionListResponse {
+  /**
+   * Whether the caller may reveal a version's content. `false` for an effective
+   * viewer/auditor — the UI lists versions but hides/disables the reveal action,
+   * mirroring the backend's 403 on GET /items/:id/versions/:version.
+   */
+  canReveal: boolean;
+  versions: ItemVersionSummary[];
+}
+
+/**
+ * Decrypted (Phase A, encryptionVersion=1) version content from
+ * GET /items/:id/versions/:version. In ZK mode (encryptionVersion=2) the
+ * password/notes come back as ciphertext instead — see `ItemVersionContent`.
+ */
+export interface ItemVersionContent {
+  version: number;
+  type: ItemType;
+  name: string;
+  username: string | null;
+  url: string | null;
+  /** Phase A: decrypted server-side. ZK: null (use the ciphertext fields). */
+  password: string | null;
+  notes: string | null;
+  createdAt: string;
+  editedByEmail: string;
+
+  /** ZK (encryptionVersion=2) fields — client decrypts with the vault key. */
+  passwordCiphertext?: string | null;
+  passwordIv?: string | null;
+  notesCiphertext?: string | null;
+  notesIv?: string | null;
+}
 
 /**
  * SSO error codes returned via `?error=<code>` on the redirect back to `/`.

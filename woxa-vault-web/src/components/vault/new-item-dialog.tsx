@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ChevronLeft,
-  Sparkles,
   Eye,
   EyeOff,
   ShieldCheck,
@@ -38,6 +37,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { PasswordInput } from "@/components/vault/password-input";
 import { IconTile } from "@/components/icon";
 import { itemTypeColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -447,7 +447,11 @@ export function NewItemDialog({
                     />
                   </FormField>
                   <FormField label={tr("item.api_key.key")}>
-                    <PasswordInput value={password} onChange={setPassword} />
+                    <PasswordInput
+                      value={password}
+                      onChange={setPassword}
+                      showStrength={false}
+                    />
                   </FormField>
                 </div>
               )}
@@ -752,61 +756,6 @@ function FormField({
       </Label>
       {children}
       {hint && <p className="text-[10px] text-muted-foreground/80">{hint}</p>}
-    </div>
-  );
-}
-
-function PasswordInput({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  const tr = useT();
-  const [show, setShow] = useState(false);
-
-  const generate = () => {
-    const chars =
-      "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!#$%&*+-=";
-    const len = 20;
-    let out = "";
-    const arr = new Uint32Array(len);
-    crypto.getRandomValues(arr);
-    for (let i = 0; i < len; i++) out += chars[arr[i] % chars.length];
-    onChange(out);
-    setShow(true);
-    toast.success(tr("toast.strong_pw"));
-  };
-
-  return (
-    <div className="relative">
-      <Input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        type={show ? "text" : "password"}
-        placeholder="••••••••"
-        className="pr-20 font-mono-secret text-sm"
-      />
-      <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
-        <button
-          type="button"
-          onClick={generate}
-          aria-label={tr("toast.strong_pw")}
-          className="size-7 rounded-md hover:bg-surface-2 text-muted-foreground hover:text-brand flex items-center justify-center"
-          title={tr("toast.strong_pw")}
-        >
-          <Sparkles className="size-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={() => setShow((v) => !v)}
-          aria-label={show ? tr("common.hide") : tr("common.show")}
-          className="size-7 rounded-md hover:bg-surface-2 text-muted-foreground hover:text-foreground flex items-center justify-center"
-        >
-          {show ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-        </button>
-      </div>
     </div>
   );
 }

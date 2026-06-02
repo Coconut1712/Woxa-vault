@@ -7,6 +7,10 @@ import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/provider";
 import { copyWithAutoClear } from "@/lib/clipboard";
 
+// On-screen reveal of a secret value auto-hides after 5s (AC-013.4). This is
+// distinct from the clipboard auto-clear (30s, AC-014.3) handled below.
+const REVEAL_HIDE_MS = 5_000;
+
 interface SecretFieldProps {
   label: string;
   /**
@@ -100,7 +104,7 @@ export function SecretField({
     const v = await ensureValue();
     if (v === null) return;
     setRevealed(true);
-    setAutoHideAt(Date.now() + 30_000);
+    setAutoHideAt(Date.now() + REVEAL_HIDE_MS);
   };
 
   const handleCopy = async () => {
@@ -135,7 +139,7 @@ export function SecretField({
         {autoHideAt && (
           <span className="text-[10px] text-amber-400 flex items-center gap-1">
             <span className="size-1 rounded-full bg-amber-400 animate-pulse-soft" />
-            {t("secret.hides_in_30s")}
+            {t("secret.hides_in_5s")}
           </span>
         )}
       </div>

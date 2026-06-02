@@ -21,6 +21,8 @@ import type {
   ItemFull,
   ItemSummary,
   ItemUpdateInput,
+  ItemVersionContent,
+  ItemVersionListResponse,
 } from "./types";
 
 interface ItemListResponse {
@@ -112,6 +114,41 @@ export async function updateItem(
     { method: "PATCH", body: input },
   );
   return res.item;
+}
+
+/**
+ * GET /items/:id/versions — password version history, newest first, capped at
+ * 10 (US-015 / FR-037). Metadata only; never returns secret content. The
+ * `canReveal` flag is `false` for an effective viewer/auditor so the UI can
+ * hide the per-version reveal action. A 404 means no access to the item.
+ */
+export async function listItemVersions(
+  id: string,
+  signal?: AbortSignal,
+): Promise<ItemVersionListResponse> {
+  return apiFetch<ItemVersionListResponse>(
+    `/items/${encodeURIComponent(id)}/versions`,
+    { signal },
+  );
+}
+
+/**
+ * GET /items/:id/versions/:version — reveal a single historical version's
+ * content. Gated server-side by reveal access + an unlocked vault.
+ *   - Phase A (encryptionVersion=1): `password` / `notes` come back decrypted.
+ *   - ZK (encryptionVersion=2): `passwordCiphertext` / `notesCiphertext` come
+ *     back instead; the client decrypts with the vault key.
+ * Errors: 403 for viewer/auditor, 404 for an unknown version.
+ */
+export async function getItemVersion(
+  id: string,
+  version: number,
+  signal?: AbortSignal,
+): Promise<ItemVersionContent> {
+  return apiFetch<ItemVersionContent>(
+    `/items/${encodeURIComponent(id)}/versions/${version}`,
+    { signal },
+  );
 }
 
 /** DELETE /items/:id — 204 on success. */

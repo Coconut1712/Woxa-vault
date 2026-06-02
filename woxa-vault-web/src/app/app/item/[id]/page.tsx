@@ -40,6 +40,7 @@ import { RequestAccessDialog } from "@/components/vault/request-access-dialog";
 import { CountdownTimer } from "@/components/shared/countdown-timer";
 import { AttachmentsSection } from "@/components/vault/attachments-section";
 import { ItemActivitySection } from "@/components/vault/item-activity-section";
+import { ItemVersionsSection } from "@/components/vault/item-versions-section";
 import { IconTile } from "@/components/icon";
 import {
   ApiErrorState,
@@ -59,7 +60,7 @@ import { ApiError, VAULT_UNLOCKED_EVENT } from "@/lib/api/client";
 import type { Vault, VaultRole } from "@/lib/api/types";
 import { useVaults } from "@/lib/vaults/provider";
 import { useFolders } from "@/lib/folders/provider";
-import { formatDateTime, itemTypeColor } from "@/lib/format";
+import { formatDateTime, timeAgo, itemTypeColor } from "@/lib/format";
 import { useT } from "@/lib/i18n/provider";
 import { useAuth } from "@/lib/auth/provider";
 import { useVaultLock } from "@/components/vault-lock/lock-provider";
@@ -90,6 +91,11 @@ export default function ItemDetailPage({
   const [itemError, setItemError] = useState<ApiError | null>(null);
   const [loading, setLoading] = useState(true);
   const [members, setMembers] = useState<VaultMember[]>([]);
+  // Vault key for ZK (encryptionVersion=2) vaults — needed to decrypt revealed
+  // version content client-side. undefined in Phase A (server decrypts).
+  const [vaultKey, setVaultKey] = useState<Uint8Array | undefined>(undefined);
+  // Bumped after an edit so the version history refetches the new snapshot.
+  const [versionsReload, setVersionsReload] = useState(0);
 
   const [editOpen, setEditOpen] = useState(false);
   // The item snapshot handed to EditItemDialog — same as `item` but with the
@@ -154,6 +160,7 @@ export default function ItemDetailPage({
       setItem(fetched);
       setVault(detail.vault);
       setMembers(memberRes.members);
+      setVaultKey(vaultKey ?? undefined);
     } catch (err) {
       if (err instanceof ApiError) setItemError(err);
       else setItemError(new ApiError(0, "network_error", "Network error"));
@@ -218,6 +225,8 @@ export default function ItemDetailPage({
   const handleEditSaved = useCallback(async () => {
     await loadItem();
     await refreshVaults();
+    // A save may have created a new password version — refetch the history.
+    setVersionsReload((k) => k + 1);
   }, [loadItem, refreshVaults]);
 
   const handleToggleFavorite = useCallback(async () => {
@@ -519,18 +528,27 @@ export default function ItemDetailPage({
                         placeholder={tr("item.readonly_secret")}
                       />
                     ) : item.hasPassword ? (
-                      <SecretField
-                        label={
-                          kind === "api_key"
-                            ? tr("item.api_key.key")
-                            : kind === "ssh"
-                              ? tr("item.ssh.private_key")
-                              : tr("item.password")
-                        }
-                        value={revealedPassword ?? undefined}
-                        onReveal={revealPassword}
-                        monospace
-                      />
+                      <div className="space-y-1.5">
+                        <SecretField
+                          label={
+                            kind === "api_key"
+                              ? tr("item.api_key.key")
+                              : kind === "ssh"
+                                ? tr("item.ssh.private_key")
+                                : tr("item.password")
+                          }
+                          value={revealedPassword ?? undefined}
+                          onReveal={revealPassword}
+                          monospace
+                        />
+                        {item.passwordChangedAt && (
+                          <p className="text-[10px] text-muted-foreground/80 pl-0.5">
+                            {tr("item.password_changed", {
+                              when: timeAgo(item.passwordChangedAt),
+                            })}
+                          </p>
+                        )}
+                      </div>
                     ) : null}
                     {kind === "login" && item.url && (
                       <div className="space-y-1.5">
@@ -696,6 +714,15 @@ export default function ItemDetailPage({
                   />
                 </div>
               )}
+
+              {/* Version history (US-015 / FR-037). Anyone with item access can
+                  see the list; the section hides the per-version reveal action
+                  when the backend reports canReveal=false (viewer/auditor). */}
+              <ItemVersionsSection
+                itemId={item.id}
+                vaultKey={vaultKey}
+                reloadToken={versionsReload}
+              />
 
               {canSeeActivity && (
                 <ItemActivitySection

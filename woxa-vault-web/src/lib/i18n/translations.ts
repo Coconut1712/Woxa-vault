@@ -2069,6 +2069,13 @@ export const translations: Dict = {
     en: "Strong password generated",
     th: "สร้างรหัสผ่านที่แข็งแกร่งแล้ว",
   },
+  "gen.options": { en: "Generator options", th: "ตัวเลือกการสร้างรหัสผ่าน" },
+  "gen.length": { en: "Length", th: "ความยาว" },
+  "gen.uppercase": { en: "Uppercase (A-Z)", th: "ตัวพิมพ์ใหญ่ (A-Z)" },
+  "gen.lowercase": { en: "Lowercase (a-z)", th: "ตัวพิมพ์เล็ก (a-z)" },
+  "gen.numbers": { en: "Numbers (0-9)", th: "ตัวเลข (0-9)" },
+  "gen.symbols": { en: "Symbols (!#$…)", th: "สัญลักษณ์ (!#$…)" },
+  "gen.generate": { en: "Generate", th: "สร้างรหัสผ่าน" },
   "toast.domain_added": { en: "{name} added", th: "เพิ่ม {name} แล้ว" },
   "toast.domain_added_desc": {
     en: "Add the TXT record to your DNS to verify ownership.",
@@ -2656,6 +2663,8 @@ export const translations: Dict = {
   "cmd.go_to": { en: "Go to", th: "ไปยัง" },
   "cmd.send_copy": { en: "Send one-time copy", th: "ส่งสำเนาครั้งเดียว" },
   "cmd.n_items": { en: "{n} items", th: "{n} รายการ" },
+  "cmd.searching": { en: "Searching…", th: "กำลังค้นหา…" },
+  "cmd.no_items": { en: "No matching items.", th: "ไม่พบรายการที่ตรงกัน" },
 
   /* ---- recipient page ---- */
   "recip.someone_shared": {
@@ -2898,7 +2907,7 @@ export const translations: Dict = {
     en: "Couldn't copy to clipboard",
     th: "คัดลอกไม่สำเร็จ",
   },
-  "secret.hides_in_30s": { en: "hides in 30s", th: "ซ่อนใน 30 วินาที" },
+  "secret.hides_in_5s": { en: "hides in 5s", th: "ซ่อนใน 5 วินาที" },
   "secret.clipboard_clear": {
     en: "Clipboard will clear in 30 seconds.",
     th: "Clipboard จะถูกล้างใน 30 วินาที",
@@ -5106,6 +5115,67 @@ export const translations: Dict = {
   "domains.load_error": {
     en: "Couldn't load allowed domains",
     th: "โหลดโดเมนที่อนุญาตไม่สำเร็จ",
+  },
+
+  /* ---- Item version history (US-015 / FR-037) ---- */
+  "item.versions.title": { en: "Version history", th: "ประวัติเวอร์ชัน" },
+  "item.versions.loading": {
+    en: "Loading version history…",
+    th: "กำลังโหลดประวัติเวอร์ชัน…",
+  },
+  "item.versions.empty": {
+    en: "No previous versions yet.",
+    th: "ยังไม่มีเวอร์ชันก่อนหน้า",
+  },
+  "item.versions.error": {
+    en: "Couldn't load version history.",
+    th: "โหลดประวัติเวอร์ชันไม่สำเร็จ",
+  },
+  "item.versions.retry": { en: "Try again", th: "ลองใหม่" },
+  "item.versions.label": { en: "Version {n}", th: "เวอร์ชัน {n}" },
+  "item.versions.edited_by": {
+    en: "Edited by {email}",
+    th: "แก้ไขโดย {email}",
+  },
+  "item.versions.has_password": {
+    en: "Password",
+    th: "รหัสผ่าน",
+  },
+  "item.versions.has_notes": { en: "Notes", th: "บันทึก" },
+  "item.versions.view": { en: "View this version", th: "ดูเวอร์ชันนี้" },
+  "item.versions.view_aria": {
+    en: "View version {n}",
+    th: "ดูเวอร์ชัน {n}",
+  },
+  "item.versions.cap_note": {
+    en: "Showing the {n} most recent versions.",
+    th: "แสดง {n} เวอร์ชันล่าสุด",
+  },
+  "item.versions.dialog_title": {
+    en: "Version {n}",
+    th: "เวอร์ชัน {n}",
+  },
+  "item.versions.dialog_desc": {
+    en: "Saved {when} · by {email}",
+    th: "บันทึกเมื่อ {when} · โดย {email}",
+  },
+  "item.versions.reveal_failed": {
+    en: "Couldn't reveal this version.",
+    th: "เปิดดูเวอร์ชันนี้ไม่สำเร็จ",
+  },
+  "item.versions.no_notes": {
+    en: "This version has no notes.",
+    th: "เวอร์ชันนี้ไม่มีบันทึก",
+  },
+
+  /* ---- Password age (US-015 / FR-037) ---- */
+  "item.password_changed": {
+    en: "Password last changed {when}",
+    th: "เปลี่ยนรหัสผ่านล่าสุด {when}",
+  },
+  "item.password_never_changed": {
+    en: "Password has never been changed",
+    th: "ยังไม่เคยเปลี่ยนรหัสผ่าน",
   },
 
 };

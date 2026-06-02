@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Send,
@@ -7,8 +8,10 @@ import {
   Plus,
   Settings,
   Star,
+  Loader2,
 } from "lucide-react";
-import { VaultIcon, colorFor } from "@/components/icon";
+import { VaultIcon, ItemTypeIcon, colorFor } from "@/components/icon";
+import { itemTypeColor } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/provider";
 import { useAuth } from "@/lib/auth/provider";
@@ -18,6 +21,7 @@ import {
   canViewWorkspaceSettings,
   canWriteVaultData,
 } from "@/lib/auth/permissions";
+import { searchItems, type SearchResult } from "@/lib/api/search";
 
 import {
   CommandDialog,
@@ -30,9 +34,6 @@ import {
   CommandShortcut,
 } from "@/components/ui/command";
 
-// Vaults are live via VaultsProvider. Items would belong here too, but there
-// is no global /search endpoint in round 2, so item suggestions are omitted
-// rather than rendered against a stale mock dataset.
 import { useVaults } from "@/lib/vaults/provider";
 
 interface Props {
@@ -40,11 +41,20 @@ interface Props {
   onOpenChange: (open: boolean) => void;
 }
 
+/** Min query length before we hit the server; below this we show no items. */
+const MIN_QUERY = 1;
+/** Debounce window for the per-keystroke search request. */
+const DEBOUNCE_MS = 250;
+
 export function CommandPalette({ open, onOpenChange }: Props) {
   const router = useRouter();
   const t = useT();
   const { vaults } = useVaults();
   const { me } = useAuth();
+  // The active workspace search results are scoped to. When it changes (the
+  // user switches workspace while the palette is open) we must re-run the
+  // search so stale results from the previous workspace can't be selected.
+  const activeOrgId = me?.activeOrgId ?? null;
 
   // Org-role gating mirrors the sidebar: guests can't create items/sends, and
   // audit/settings are admin-only.
@@ -56,67 +66,204 @@ export function CommandPalette({ open, onOpenChange }: Props) {
   const showSettings = canViewWorkspaceSettings(role);
   const showGoTo = showAudit || showSettings;
 
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  // Tracks the in-flight request so a newer keystroke cancels the older one.
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Reset transient search state when the palette closes so the next open
+  // starts clean (cmdk keeps the input value otherwise). Routed through the
+  // open-change handler rather than an effect to avoid a synchronous
+  // setState-in-effect cascade.
+  const handleOpenChange = (next: boolean) => {
+    if (!next) {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      setQuery("");
+      setResults([]);
+      setSearching(false);
+    }
+    onOpenChange(next);
+  };
+
+  // Debounced server search. We disable cmdk's own filtering (shouldFilter
+  // below) so server results always render — the server already matched on
+  // fields the display row doesn't show (username/url/type) and sorted them.
+  // All setState happens inside the async timer callback (never synchronously
+  // in the effect body) to keep render scheduling clean.
+  useEffect(() => {
+    const q = query.trim();
+    abortRef.current?.abort();
+
+    if (q.length < MIN_QUERY) {
+      abortRef.current = null;
+      const clear = setTimeout(() => {
+        setResults([]);
+        setSearching(false);
+      }, 0);
+      return () => clearTimeout(clear);
+    }
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    const timer = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const found = await searchItems(q, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        setResults(found);
+      } catch {
+        if (controller.signal.aborted) return;
+        // A 400 (q too long / malformed) or any other failure is swallowed
+        // silently — degrade to "no results" rather than surfacing a crash or
+        // error toast on a keystroke.
+        setResults([]);
+      } finally {
+        if (!controller.signal.aborted) setSearching(false);
+      }
+    }, DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+    // `activeOrgId` is a dependency so switching workspace while the palette is
+    // open re-runs the search (and the abort above clears the prior workspace's
+    // in-flight request), preventing a stale cross-workspace result.
+  }, [query, activeOrgId]);
+
   const go = (href: string) => {
-    onOpenChange(false);
+    handleOpenChange(false);
     router.push(href);
   };
 
+  const q = query.trim().toLowerCase();
+  const filteredVaults = q
+    ? vaults.filter((v) => v.name.toLowerCase().includes(q))
+    : vaults;
+
+  const hasItemQuery = query.trim().length >= MIN_QUERY;
+
   return (
-    <CommandDialog open={open} onOpenChange={onOpenChange}>
-      <CommandInput placeholder={t("cmd.search_placeholder")} />
+    <CommandDialog
+      open={open}
+      onOpenChange={handleOpenChange}
+      shouldFilter={false}
+    >
+      <CommandInput
+        placeholder={t("cmd.search_placeholder")}
+        value={query}
+        onValueChange={setQuery}
+      />
       <CommandList>
-        <CommandEmpty>{t("cmd.no_results")}</CommandEmpty>
+        <CommandEmpty>{searching ? t("cmd.searching") : t("cmd.no_results")}</CommandEmpty>
 
-        <CommandGroup heading={t("cmd.quick_actions")}>
-          {canCreateItem && (
-            <CommandItem onSelect={() => go("/app/new")}>
-              <Plus /> {t("vault.new_item")}
-              <CommandShortcut>⌘N</CommandShortcut>
-            </CommandItem>
-          )}
-          {canWrite && (
-            <CommandItem onSelect={() => go("/app/sends/new")}>
-              <Send /> {t("cmd.send_copy")}
-              <CommandShortcut>⌘S</CommandShortcut>
-            </CommandItem>
-          )}
-          <CommandItem onSelect={() => go("/app/favorites")}>
-            <Star /> {t("nav.favorites")}
-          </CommandItem>
-        </CommandGroup>
-
-        <CommandSeparator />
-
-        <CommandGroup heading={t("cmd.vaults")}>
-          {vaults.map((v) => {
-            const c = colorFor(v.color ?? "violet");
-            return (
-              <CommandItem
-                key={v.id}
-                onSelect={() => go(`/app/vault/${v.id}`)}
-              >
-                <div
-                  className={cn(
-                    "size-5 rounded-md flex items-center justify-center ring-1",
-                    c.bg,
-                    c.ring,
-                  )}
-                >
-                  <VaultIcon
-                    name={v.iconKey ?? "folder"}
-                    className={cn("size-3", c.text)}
-                  />
-                </div>
-                <span>{v.name}</span>
-                <span className="ml-auto text-xs text-muted-foreground">
-                  {t("cmd.n_items", { n: v.itemCount })}
-                </span>
+        {!q && (
+          <CommandGroup heading={t("cmd.quick_actions")}>
+            {canCreateItem && (
+              <CommandItem onSelect={() => go("/app/new")}>
+                <Plus /> {t("vault.new_item")}
+                <CommandShortcut>⌘N</CommandShortcut>
               </CommandItem>
-            );
-          })}
-        </CommandGroup>
+            )}
+            {canWrite && (
+              <CommandItem onSelect={() => go("/app/sends/new")}>
+                <Send /> {t("cmd.send_copy")}
+                <CommandShortcut>⌘S</CommandShortcut>
+              </CommandItem>
+            )}
+            <CommandItem onSelect={() => go("/app/favorites")}>
+              <Star /> {t("nav.favorites")}
+            </CommandItem>
+          </CommandGroup>
+        )}
 
-        {showGoTo && (
+        {hasItemQuery && (
+          <>
+            {!q && <CommandSeparator />}
+            <CommandGroup heading={t("cmd.items")}>
+              {searching && results.length === 0 && (
+                <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  {t("cmd.searching")}
+                </div>
+              )}
+              {!searching && results.length === 0 && (
+                <div className="px-2 py-3 text-xs text-muted-foreground">
+                  {t("cmd.no_items")}
+                </div>
+              )}
+              {results.map((item) => {
+                const c = colorFor(itemTypeColor[item.type] ?? "blue");
+                return (
+                  <CommandItem
+                    key={item.id}
+                    value={item.id}
+                    onSelect={() => go(`/app/item/${item.id}`)}
+                  >
+                    <div
+                      className={cn(
+                        "size-5 rounded-md flex items-center justify-center ring-1",
+                        c.bg,
+                        c.ring,
+                      )}
+                    >
+                      <ItemTypeIcon
+                        type={item.type}
+                        className={cn("size-3", c.text)}
+                      />
+                    </div>
+                    <span className="truncate">{item.name}</span>
+                    {item.username && (
+                      <span className="truncate text-xs text-muted-foreground">
+                        {item.username}
+                      </span>
+                    )}
+                    <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                      {item.vaultName}
+                    </span>
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+          </>
+        )}
+
+        {filteredVaults.length > 0 && (
+          <>
+            {(hasItemQuery || !q) && <CommandSeparator />}
+            <CommandGroup heading={t("cmd.vaults")}>
+              {filteredVaults.map((v) => {
+                const c = colorFor(v.color ?? "violet");
+                return (
+                  <CommandItem
+                    key={v.id}
+                    value={`vault:${v.id}`}
+                    onSelect={() => go(`/app/vault/${v.id}`)}
+                  >
+                    <div
+                      className={cn(
+                        "size-5 rounded-md flex items-center justify-center ring-1",
+                        c.bg,
+                        c.ring,
+                      )}
+                    >
+                      <VaultIcon
+                        name={v.iconKey ?? "folder"}
+                        className={cn("size-3", c.text)}
+                      />
+                    </div>
+                    <span>{v.name}</span>
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {t("cmd.n_items", { n: v.itemCount })}
+                    </span>
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+          </>
+        )}
+
+        {showGoTo && !q && (
           <>
             <CommandSeparator />
 

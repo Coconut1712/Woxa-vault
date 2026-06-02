@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { PasswordInput } from "@/components/vault/password-input";
 import { IconTile } from "@/components/icon";
 import { AttachmentsSection } from "@/components/vault/attachments-section";
 import { useVaults } from "@/lib/vaults/provider";
@@ -60,7 +61,6 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
   const [username, setUsername] = useState(item.username ?? "");
   const [password, setPassword] = useState(item.password ?? "");
   const [url, setUrl] = useState(item.url ?? "");
-  const [showPw, setShowPw] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const [folderId, setFolderId] = useState<string>(item.folderId ?? "");
@@ -82,7 +82,6 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
       setUsername(item.username ?? "");
       setPassword(item.password ?? "");
       setUrl(item.url ?? "");
-      setShowPw(false);
       setFolderId(item.folderId ?? "");
       setTagsText(item.displayTags.join(", "));
       setFavorite(item.displayFavorite);
@@ -254,26 +253,7 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
                 </FormField>
 
                 <FormField label={tr("item.password")}>
-                  <div className="relative">
-                    <Input
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      type={showPw ? "text" : "password"}
-                      className="pr-10 font-mono-secret text-sm"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPw((v) => !v)}
-                      aria-label={showPw ? tr("common.hide") : tr("common.show")}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 size-7 rounded-md hover:bg-surface-2 text-muted-foreground hover:text-foreground flex items-center justify-center"
-                    >
-                      {showPw ? (
-                        <EyeOff className="size-3.5" />
-                      ) : (
-                        <Eye className="size-3.5" />
-                      )}
-                    </button>
-                  </div>
+                  <PasswordInput value={password} onChange={setPassword} />
                 </FormField>
 
                 <FormField label={tr("item.url")}>
@@ -306,22 +286,11 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
                 />
               </FormField>
               <FormField label={tr("item.api_key.key")}>
-                <div className="relative">
-                  <Input
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    type={showPw ? "text" : "password"}
-                    className="pr-10 font-mono-secret text-sm"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPw((v) => !v)}
-                    aria-label={showPw ? tr("common.hide") : tr("common.show")}
-                    className="absolute right-1 top-1/2 -translate-y-1/2 size-7 rounded-md hover:bg-surface-2 text-muted-foreground hover:text-foreground flex items-center justify-center"
-                  >
-                    {showPw ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                  </button>
-                </div>
+                <PasswordInput
+                  value={password}
+                  onChange={setPassword}
+                  showStrength={false}
+                />
               </FormField>
             </>
           )}

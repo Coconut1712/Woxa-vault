@@ -12,12 +12,13 @@
  */
 
 import { apiFetch } from "./client";
+import type { ItemType } from "./types";
 
 export interface TrashItem {
   id: string;
   vaultId: string;
   vaultName: string;
-  type: "login" | "note";
+  type: ItemType;
   name: string;
   username: string | null;
   deletedAt: string;

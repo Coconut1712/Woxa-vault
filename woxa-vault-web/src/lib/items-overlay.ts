@@ -19,6 +19,8 @@ import {
   listItems as apiList,
   updateItem as apiUpdate,
   deleteItem as apiDelete,
+  listItemVersions as apiListVersions,
+  getItemVersion as apiGetVersion,
 } from "@/lib/api/items";
 import { listItemMembers as apiListMembers } from "@/lib/api/grants";
 import type {
@@ -26,6 +28,9 @@ import type {
   ItemFull,
   ItemSummary,
   ItemUpdateInput,
+  ItemVersionContent,
+  ItemVersionListResponse,
+  ItemVersionSummary,
   VaultRole,
   VaultMember,
 } from "@/lib/api/types";
@@ -105,7 +110,13 @@ function decorateSummary(item: ItemSummary): DisplayItemSummary {
     // folderId now comes from the wire; the cache value is only a hint when
     // the wire has nothing for an old item.
     folderId: item.folderId ?? cached?.folderId ?? null,
-    displayKind: cached?.displayKind ?? item.type,
+    // Server `type` is authoritative for rich kinds (FR-030); only fall back to
+    // the per-browser cache hint when the wire reports the collapsible
+    // login/note, so a stale cache can't mislabel a migrated rich item.
+    displayKind:
+      item.type !== "login" && item.type !== "note"
+        ? item.type
+        : cached?.displayKind ?? item.type,
     displayTags: cached?.tags ?? [],
     displayFavorite: cached?.favorite ?? item.favorite,
     displayHasTotp: cached?.hasTotp ?? item.hasTotp,
@@ -152,12 +163,8 @@ export async function getDisplayItem(
   
   let decryptedNotes = item.notes || "";
   if (vaultKey && item.notesCiphertext && item.notesIv) {
-    const combined = fromBase64(item.notesCiphertext);
-    decryptedNotes = await decryptData({
-      ciphertext: combined.slice(0, -16),
-      authTag: combined.slice(-16),
-      iv: fromBase64(item.notesIv),
-    }, vaultKey);
+    decryptedNotes =
+      (await decryptZk(item.notesCiphertext, item.notesIv, vaultKey)) ?? "";
   }
 
   const { meta, notes } = decodeMeta(decryptedNotes, item.type);
@@ -184,16 +191,113 @@ export async function getItemPassword(
   
   // Phase C: If ZK, decrypt on client
   if (vaultKey && "passwordCiphertext" in res && res.passwordCiphertext && res.passwordIv) {
-    const combined = fromBase64(res.passwordCiphertext as string);
-    return await decryptData({
-      ciphertext: combined.slice(0, -16),
-      authTag: combined.slice(-16),
-      iv: fromBase64(res.passwordIv as string),
-    }, vaultKey);
+    return decryptZk(
+      res.passwordCiphertext as string,
+      res.passwordIv as string,
+      vaultKey,
+    );
   }
 
   // Phase A: Server returned plaintext
   return (res as { password: string | null }).password;
+}
+
+/**
+ * Decrypt one ZK ciphertext+iv pair (base64) with the vault key. The wire packs
+ * the GCM auth tag as the trailing 16 bytes of the ciphertext blob — the same
+ * layout `getDisplayItem` / `getItemPassword` decode. Returns null when either
+ * input is missing (e.g. a version that had no password).
+ */
+async function decryptZk(
+  ciphertext: string | null | undefined,
+  iv: string | null | undefined,
+  vaultKey: Uint8Array,
+): Promise<string | null> {
+  if (!ciphertext || !iv) return null;
+  const combined = fromBase64(ciphertext);
+  return decryptData(
+    {
+      ciphertext: combined.slice(0, -16),
+      authTag: combined.slice(-16),
+      iv: fromBase64(iv),
+    },
+    vaultKey,
+  );
+}
+
+/** Reveal-ready version content after any ZK ciphertext has been decrypted. */
+export interface DisplayItemVersion {
+  version: number;
+  type: ItemVersionContent["type"];
+  name: string;
+  username: string | null;
+  url: string | null;
+  password: string | null;
+  notesPlain: string;
+  createdAt: string;
+  editedByEmail: string;
+}
+
+/**
+ * List an item's password version history (US-015 / FR-037). Pure passthrough —
+ * metadata only, no decryption. `canReveal` is `false` for viewer/auditor.
+ */
+export async function listDisplayItemVersions(
+  id: string,
+  signal?: AbortSignal,
+): Promise<ItemVersionListResponse> {
+  return apiListVersions(id, signal);
+}
+
+/**
+ * Reveal a single historical version's content. In ZK mode (vaultKey supplied)
+ * the password/notes come back as ciphertext and we decrypt client-side with
+ * the SAME helper the item detail uses; in Phase A the server already decrypted
+ * them. The notes blob carries the meta header, so we strip it back to plain
+ * user notes for display.
+ */
+export async function getDisplayItemVersion(
+  id: string,
+  version: number,
+  signal?: AbortSignal,
+  vaultKey?: Uint8Array,
+): Promise<DisplayItemVersion> {
+  const v = await apiGetVersion(id, version, signal);
+
+  // ZK detection: in encryptionVersion=2 the server returns only ciphertext
+  // (password/notes come back null/empty). If we have ciphertext but no vault
+  // key we CANNOT decrypt — surfacing an empty version silently would hide a
+  // real failure (the dialog would open showing nothing). Throw so the caller's
+  // revealError path shows a meaningful message instead.
+  const isZk = Boolean(v.passwordCiphertext || v.notesCiphertext);
+  if (isZk && !vaultKey) {
+    throw new Error("zk_vault_key_missing");
+  }
+
+  let password = v.password;
+  let notesRaw = v.notes ?? "";
+  if (vaultKey) {
+    if (v.passwordCiphertext) {
+      password = await decryptZk(v.passwordCiphertext, v.passwordIv, vaultKey);
+    }
+    if (v.notesCiphertext) {
+      notesRaw = (await decryptZk(v.notesCiphertext, v.notesIv, vaultKey)) ?? "";
+    }
+  }
+
+  const { notes } = decodeMeta(notesRaw, v.type);
+
+  return {
+    version: v.version,
+    type: v.type,
+    name: v.name,
+    username: v.username,
+    url: v.url,
+    password,
+    notesPlain: notes,
+    createdAt: v.createdAt,
+    editedByEmail: v.editedByEmail,
+  };
 }
 
 function buildDisplay(
@@ -353,6 +457,16 @@ export async function updateDisplayItem(
 
   if (next.name.trim() !== current.name) patch.name = next.name.trim();
 
+  // Item type-change (FR-030). The backend now persists all six types verbatim
+  // and accepts `type` on PATCH. We send it ONLY when the kind actually changed
+  // so an ordinary edit doesn't carry a redundant type. The per-type secrets
+  // (card/ssh/identity/totp/custom fields) still travel encrypted inside the
+  // notes meta blob below — changing `type` never moves a secret to plaintext.
+  const nextWireType = wireTypeFor(next.meta.displayKind);
+  if (nextWireType !== current.type) {
+    patch.type = nextWireType;
+  }
+
   // Folder placement now lives on the wire — diff against the current row.
   // `null` clears the assignment, omitting the key leaves it alone.
   const nextFolderId = next.meta.folderId ?? null;
@@ -383,14 +497,22 @@ export async function updateDisplayItem(
     patch.url = null;
   }
 
-  // Password for login / api_key / ssh
+  // Password for login / api_key / ssh.
+  //
+  // `wirePassword === undefined` means "leave the existing ciphertext untouched"
+  // — we then OMIT the password key entirely from the PATCH. This is critical
+  // for US-015 / FR-037: the backend only bumps `passwordChangedAt` and snapshots
+  // a version when a PATCH carries a non-empty password. If we sent the password
+  // on every save (the old `null` default) we'd both wipe an unchanged secret
+  // AND, in ZK mode, send `""` (clear). So we send the key ONLY when the value
+  // actually changed: a string to set, `null` to clear.
   const passwordRelevant =
     next.meta.displayKind === "login" ||
     next.meta.displayKind === "api_key" ||
     next.meta.displayKind === "ssh";
   const currentPassword = current.password ?? "";
-  
-  let wirePassword: string | null = null;
+
+  let wirePassword: string | null | undefined;
   if (passwordRelevant) {
     if (next.password !== currentPassword) {
       wirePassword = next.password ? next.password : null;
@@ -508,4 +630,10 @@ export function withVaultRole<T extends DisplayItemSummary>(
 
 /* Re-exports for convenience */
 export { emptyMeta };
-export type { CustomField, ItemMeta, VaultMember };
+export type {
+  CustomField,
+  ItemMeta,
+  VaultMember,
+  ItemVersionSummary,
+  ItemVersionListResponse,
+};
