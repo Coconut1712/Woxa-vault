@@ -17,7 +17,7 @@
     "dev:pg": "tsx scripts/dev-pg.ts"
   },
   "dependencies": {
-    "@hono/node-server": "^1.13.7",
+    "@hono/node-server": "^2.0.4",
     "@hono/zod-validator": "^0.4.2",
     "@node-rs/argon2": "^2.0.2",
     "@oslojs/crypto": "^1.0.1",
