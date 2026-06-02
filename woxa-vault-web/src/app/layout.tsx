@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -33,6 +33,11 @@ export default async function RootLayout({
   const stored = cookieStore.get("woxa-locale")?.value;
   const initialLocale: Locale = stored === "th" ? "th" : "en";
 
+  // Per-request CSP nonce minted in proxy.ts. Passed to next-themes so its
+  // inline no-flash theme script carries the nonce and passes a strict
+  // (enforced) script-src. Undefined in the rare static-render path.
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
+
   return (
     <html
       lang={initialLocale}
@@ -45,6 +50,7 @@ export default async function RootLayout({
           defaultTheme="light"
           enableSystem
           disableTransitionOnChange
+          nonce={nonce}
         >
           <I18nProvider initialLocale={initialLocale}>
             <AuthProvider>
