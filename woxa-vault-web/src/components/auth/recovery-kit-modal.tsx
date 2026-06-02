@@ -20,8 +20,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, CloudUpload, Copy, Download, Printer, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CloudUpload, Copy, Download, Printer, ShieldCheck, FileText } from "lucide-react";
 import { toast } from "sonner";
+import { jsPDF } from "jspdf";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -41,7 +42,7 @@ const PRINT_FALLBACK_CLEANUP_MS = 30_000;
 export type RecoveryKitContext = "setup" | "regenerate" | "signup";
 
 interface RecoveryKitModalProps {
-  /** The plaintext recovery code from the backend. */
+  /** The plaintext recovery mnemonic from the backend. */
   recoveryCode: string;
   /**
    * Called when the user ticks both confirmation boxes and presses Continue.
@@ -139,9 +140,6 @@ export function RecoveryKitModal({
 
     clearClipboardTimers();
 
-    // Kick off a countdown so the user can see exactly when the OS clipboard
-    // will be wiped — clipboard-reading browser extensions can read this
-    // value indefinitely otherwise.
     const totalSeconds = Math.floor(CLIPBOARD_CLEAR_MS / 1000);
     setCopyState({ status: "copied", remainingSeconds: totalSeconds });
 
@@ -161,13 +159,9 @@ export function RecoveryKitModal({
     }, CLIPBOARD_TICK_MS);
 
     copyTimersRef.current.timeout = window.setTimeout(() => {
-      // Best-effort overwrite. If the page lost focus the clipboard write may
-      // throw — we swallow that case rather than alarming the user.
       navigator.clipboard.writeText("").catch(() => {});
       setCopyState({ status: "cleared" });
       clearClipboardTimers();
-      // Reset the button label back to "Copy" after a short hold so the user
-      // sees the "cleared" confirmation, then can re-copy if needed.
       window.setTimeout(() => {
         setCopyState((prev) =>
           prev.status === "cleared" ? { status: "idle" } : prev,
@@ -176,36 +170,63 @@ export function RecoveryKitModal({
     }, CLIPBOARD_CLEAR_MS);
   }, [clearClipboardTimers, recoveryCode, t]);
 
-  const performDownload = useCallback(() => {
-    const filename = `woxa-vault-recovery-kit-${new Date()
-      .toISOString()
-      .slice(0, 10)}.txt`;
-    const body = buildRecoveryKitText(recoveryCode, {
-      generatedAt: new Date().toISOString(),
-      warning: t("recovery_kit_modal.warning_one_time"),
-      heading: t("recovery_kit_modal.download.heading"),
-      instructions: t("recovery_kit_modal.download.instructions"),
-    });
-    const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    // Strip Referer + opener from the synthetic anchor so error monitoring and
-    // download-watching extensions can't correlate the file with the page URL.
-    a.rel = "noreferrer noopener";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  }, [recoveryCode, t]);
+  const handleDownloadPdf = useCallback(() => {
+    const doc = new jsPDF();
+    const dateStr = new Date().toLocaleDateString();
+    
+    // Header
+    doc.setFontSize(22);
+    doc.setTextColor(99, 102, 241); // #6366f1
+    doc.text("Woxa Vault", 20, 20);
+    
+    doc.setFontSize(18);
+    doc.setTextColor(17, 24, 39); // #111827
+    doc.text(title, 20, 35);
+    
+    doc.setFontSize(10);
+    doc.setTextColor(107, 114, 128); // #6b7280
+    doc.text(`${t("recovery_kit_modal.print.generated_label")}: ${dateStr}`, 20, 42);
+    
+    // Recovery Words
+    doc.setFontSize(12);
+    doc.setTextColor(17, 24, 39);
+    doc.text(t("recovery_kit_modal.code_label"), 20, 55);
+    
+    const words = recoveryCode.split(" ");
+    doc.setFont("courier", "bold");
+    doc.setFontSize(14);
+    
+    // Grid of 3 columns
+    for (let i = 0; i < words.length; i++) {
+      const col = i % 3;
+      const row = Math.floor(i / 3);
+      const x = 25 + col * 60;
+      const y = 65 + row * 10;
+      doc.text(`${String(i + 1).padStart(2, "0")}. ${words[i]}`, x, y);
+    }
+    
+    // Warning
+    doc.setDrawColor(254, 202, 202); // #fecaca
+    doc.setFillColor(254, 242, 242); // #fef2f2
+    doc.roundedRect(20, 150, 170, 25, 3, 3, "FD");
+    
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    doc.setTextColor(153, 27, 27); // #991b1b
+    const warningLines = doc.splitTextToSize(t("recovery_kit_modal.warning_one_time"), 160);
+    doc.text(warningLines, 25, 158);
+    
+    // Instructions
+    doc.setTextColor(55, 65, 81); // #374151
+    const instructionLines = doc.splitTextToSize(t("recovery_kit_modal.download.instructions"), 170);
+    doc.text(instructionLines, 20, 185);
+    
+    doc.save(`woxa-recovery-kit-${new Date().toISOString().slice(0, 10)}.pdf`);
+    toast.success(t("recovery_kit_modal.download_success"));
+  }, [recoveryCode, t, title]);
 
   const handlePrint = useCallback(() => {
-    // Tear down any prior print iframe before queueing a new one.
     printCleanupRef.current?.();
-
-    // Render an isolated, stylised printable card in a hidden iframe so we
-    // don't fight the app's stylesheet / dark mode.
     const iframe = document.createElement("iframe");
     iframe.setAttribute("aria-hidden", "true");
     iframe.style.position = "fixed";
@@ -245,9 +266,7 @@ export function RecoveryKitModal({
       if (fallback !== null) window.clearTimeout(fallback);
       try {
         win.removeEventListener("afterprint", cleanup);
-      } catch {
-        // ignore — iframe may already be detached
-      }
+      } catch {}
       if (iframe.parentNode) {
         iframe.parentNode.removeChild(iframe);
       }
@@ -257,9 +276,6 @@ export function RecoveryKitModal({
     };
 
     win.addEventListener("afterprint", cleanup);
-    // Some browsers (older Safari, certain Linux flavors) never fire
-    // afterprint when the user dismisses the dialog — wire a generous
-    // fallback so the DOM doesn't leak the recovery code forever.
     fallback = window.setTimeout(cleanup, PRINT_FALLBACK_CLEANUP_MS);
     printCleanupRef.current = cleanup;
 
@@ -285,7 +301,6 @@ export function RecoveryKitModal({
       aria-labelledby="recovery-kit-modal-title"
       className="fixed inset-0 z-[100] flex items-center justify-center p-4"
     >
-      {/* Static backdrop — explicitly does NOT close on click. */}
       <div
         aria-hidden="true"
         className="absolute inset-0 bg-black/40 backdrop-blur-sm"
@@ -293,7 +308,6 @@ export function RecoveryKitModal({
 
       <div className="relative w-full max-w-lg max-h-[calc(100vh-2rem)] overflow-y-auto bg-card border border-border rounded-2xl shadow-card card-elevated">
         <div className="p-6 space-y-5">
-          {/* Header */}
           <div className="flex items-start gap-3">
             <div className="size-10 rounded-xl bg-gradient-to-br from-[#7c66ff] to-[#c084fc] flex items-center justify-center shadow-brand shrink-0">
               <ShieldCheck className="size-5 text-white" strokeWidth={2.5} />
@@ -311,7 +325,6 @@ export function RecoveryKitModal({
             </div>
           </div>
 
-          {/* Warning banner */}
           <div className="flex items-start gap-2 rounded-lg border border-rose-500/30 dark:border-rose-500/10 bg-rose-500/[0.06] dark:bg-rose-500/[0.02] px-3 py-2.5 text-rose-700 dark:text-rose-300">
             <AlertTriangle className="size-4 mt-0.5 shrink-0" />
             <p className="text-xs leading-relaxed">
@@ -319,31 +332,32 @@ export function RecoveryKitModal({
             </p>
           </div>
 
-          {/* Recovery code display */}
           <div className="space-y-2">
             <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
               {t("recovery_kit_modal.code_label")}
             </div>
-            <div className="rounded-lg border border-line-2 bg-surface-1 p-4">
-              <code
-                className="block font-mono text-sm sm:text-base leading-relaxed tracking-wide break-all select-all text-foreground"
-                /* Block drag-drop into other fields/apps — `select-all` makes
-                   a single click highlight the entire code which is otherwise
-                   trivial to drop into a chat window by accident. */
-                onDragStart={(e) => e.preventDefault()}
-                draggable={false}
-              >
-                {formatRecoveryCodeForDisplay(recoveryCode)}
-              </code>
+            <div className="rounded-lg border border-line-2 bg-surface-1 p-5 shadow-inner">
+              <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+                {recoveryCode.split(" ").map((word, idx) => (
+                  <div key={idx} className="flex items-center gap-3">
+                    <span className="text-[10px] font-mono text-muted-foreground w-4 tabular-nums">
+                      {idx + 1}.
+                    </span>
+                    <span className="text-sm font-semibold tracking-wide font-mono text-foreground">
+                      {word}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
 
-            {/* Actions row */}
-            <div className="flex flex-wrap gap-2 pt-1">
+            <div className="flex flex-wrap gap-2 pt-2">
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 onClick={() => void handleCopy()}
+                className="h-9 px-3"
               >
                 <Copy className="size-3.5" />
                 {copyLabel}
@@ -352,32 +366,24 @@ export function RecoveryKitModal({
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={performDownload}
+                onClick={handleDownloadPdf}
+                className="h-9 px-3 border-brand/20 bg-brand/[0.03] text-brand hover:bg-brand/[0.08]"
               >
-                <Download className="size-3.5" />
-                {t("recovery_kit_modal.action.download")}
+                <FileText className="size-3.5" />
+                {t("recovery_kit_modal.action.download_pdf")}
               </Button>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 onClick={handlePrint}
+                className="h-9 px-3"
               >
                 <Printer className="size-3.5" />
                 {t("recovery_kit_modal.action.print")}
               </Button>
             </div>
-            {copyState.status === "copied" && copyState.remainingSeconds > 0 && (
-              <p className="text-[11px] text-muted-foreground pt-1">
-                {t("recovery_kit_modal.clipboard_hint", {
-                  seconds: copyState.remainingSeconds,
-                })}
-              </p>
-            )}
-            {/* Cloud-sync warning for the .txt download — many download folders
-                (iCloud Drive, Google Drive, OneDrive) auto-sync to the cloud,
-                so we surface this risk inline next to the action rather than
-                in a confirm dialog. */}
+            
             <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 dark:border-amber-500/20 bg-amber-500/15 dark:bg-amber-500/10 px-3 py-2 text-amber-700 dark:text-amber-400">
               <CloudUpload className="size-3.5 mt-0.5 shrink-0" />
               <p className="text-[11px] leading-relaxed">
@@ -386,7 +392,6 @@ export function RecoveryKitModal({
             </div>
           </div>
 
-          {/* Confirmation checkboxes */}
           <div className="space-y-3 rounded-lg border border-line-1 bg-surface-1 p-3">
             <ConfirmRow
               checked={savedConfirmed}
@@ -402,7 +407,6 @@ export function RecoveryKitModal({
             />
           </div>
 
-          {/* Continue button */}
           <Button
             type="button"
             disabled={!canContinue}
@@ -447,57 +451,6 @@ function ConfirmRow({
   );
 }
 
-/**
- * Format the backend's `xxxx-xxxx-…` code for display.
- *
- * Backend currently emits 14 blocks of 4 chars (52 base32 body chars + 4 hex
- * checksum chars) separated by dashes. Older kits generated before the
- * checksum upgrade are 13 blocks of 4 — both shapes are still accepted by
- * `/auth/password/reset-with-recovery`. We re-chunk defensively to handle
- * either length, codes pasted without dashes, and any future re-sizing.
- */
-function formatRecoveryCodeForDisplay(code: string): string {
-  const cleaned = code.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
-  if (cleaned.length === 0) return code;
-  const groups: string[] = [];
-  for (let i = 0; i < cleaned.length; i += 4) {
-    groups.push(cleaned.slice(i, i + 4));
-  }
-  return groups.join("-");
-}
-
-/* =====================================================================
-   Plaintext download body
-   ===================================================================== */
-function buildRecoveryKitText(
-  code: string,
-  meta: {
-    generatedAt: string;
-    warning: string;
-    heading: string;
-    instructions: string;
-  },
-): string {
-  return [
-    "==============================================",
-    `  ${meta.heading}`,
-    "==============================================",
-    "",
-    `Generated: ${meta.generatedAt}`,
-    "",
-    "Recovery code:",
-    "",
-    `  ${formatRecoveryCodeForDisplay(code)}`,
-    "",
-    "----------------------------------------------",
-    meta.warning,
-    "----------------------------------------------",
-    "",
-    meta.instructions,
-    "",
-  ].join("\n");
-}
-
 /* =====================================================================
    Print-friendly HTML
    ===================================================================== */
@@ -511,9 +464,7 @@ function buildPrintHtml(
     instructions: string;
   },
 ): string {
-  const formatted = formatRecoveryCodeForDisplay(code);
-  // NOTE: This document is intentionally self-contained — it runs inside an
-  // isolated iframe and must not depend on the host app's stylesheet.
+  const words = code.split(" ");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -567,20 +518,26 @@ function buildPrintHtml(
     letter-spacing: 0.1em;
     color: #6b7280;
     font-weight: 700;
-    margin-bottom: 8px;
+    margin-bottom: 12px;
   }
-  .code {
-    font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-    font-size: 18px;
-    line-height: 1.7;
+  .grid {
+    display: grid;
+    grid-template-cols: repeat(3, 1fr);
+    gap: 12px;
     background: #f3f4f6;
     border: 1px solid #d1d5db;
     border-radius: 8px;
-    padding: 16px;
-    word-break: break-all;
-    letter-spacing: 0.04em;
+    padding: 20px;
     margin-bottom: 24px;
   }
+  .word-row {
+    display: flex;
+    gap: 8px;
+    font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 14px;
+  }
+  .num { color: #6b7280; width: 20px; text-align: right; }
+  .word { font-weight: 700; }
   .warning {
     background: #fef2f2;
     border: 1px solid #fecaca;
@@ -599,6 +556,7 @@ function buildPrintHtml(
   @media print {
     body { padding: 0; }
     .card { border-color: #000; }
+    .grid { background: #fff; }
   }
 </style>
 </head>
@@ -607,8 +565,19 @@ function buildPrintHtml(
     <div class="brand"><span class="brand-dot"></span> Woxa Vault</div>
     <h1>${escapeHtml(meta.heading)}</h1>
     <div class="gen">${escapeHtml(meta.generatedLabel)}: ${escapeHtml(meta.generatedAt)}</div>
-    <div class="label">Recovery code</div>
-    <div class="code">${escapeHtml(formatted)}</div>
+    <div class="label">Recovery Mnemonic (24 Words)</div>
+    <div class="grid">
+      ${words
+        .map(
+          (w, i) => `
+        <div class="word-row">
+          <span class="num">${i + 1}.</span>
+          <span class="word">${escapeHtml(w)}</span>
+        </div>
+      `,
+        )
+        .join("")}
+    </div>
     <div class="warning">${escapeHtml(meta.warning)}</div>
     <div class="instructions">${escapeHtml(meta.instructions)}</div>
   </div>

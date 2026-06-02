@@ -60,7 +60,7 @@ const patchSchema = z.object({ role: roleSchema });
 // a member to owner via PATCH, never at invite time.
 const inviteSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(254),
-  role: z.enum(["admin", "member", "guest"]),
+  role: z.enum(ASSIGNABLE_ORG_ROLES),
 });
 
 // Invite token lifetime (DESIGN.md §3 "signed invite link, HMAC, exp 7d").
@@ -204,19 +204,6 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
         .map(toInvitationDTO)
         .filter((i) => i.status === "pending");
     }
-
-    await db.insert(auditEvents).values({
-      orgId: current.orgId,
-      actorUserId: user.id,
-      actorEmail: user.email,
-      action: "member.list_viewed",
-      targetType: "organization",
-      targetId: current.orgId,
-      ipHash: hashIp(getClientIp(c)),
-      userAgent: c.req.header("user-agent") ?? null,
-      success: true,
-      metadata: { memberCount: members.length, pendingInviteCount: pendingInvites.length },
-    });
 
     return c.json({ members, invitations: pendingInvites });
   })

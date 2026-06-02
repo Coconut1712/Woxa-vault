@@ -128,6 +128,7 @@ export function Sidebar() {
   // sends; the backend blocks POST /sends for them).
   const topNavForRole = topNav.filter((item) => {
     if (item.href === "/app/sends") return !isGuest(role);
+    if (item.href === "/app/requests") return role !== "auditor";
     if (item.href === "/app/import") return showImportLink;
     return true;
   });

@@ -29,6 +29,7 @@ import {
   ArrowRight,
   Building2,
   Crown,
+  FileSearch,
   Loader2,
   Plus,
   ShieldCheck,
@@ -74,6 +75,11 @@ const roleIconColor: Record<
     icon: UsersIcon,
     color:
       "bg-blue-500/15 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 dark:border-blue-500/20",
+  },
+  auditor: {
+    icon: FileSearch,
+    color:
+      "bg-emerald-500/15 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 dark:border-emerald-500/20",
   },
   guest: {
     icon: UserCog,

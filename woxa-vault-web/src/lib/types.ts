@@ -25,7 +25,7 @@ export interface User {
   email: string;
   name: string;
   avatarUrl?: string;
-  role: "owner" | "admin" | "member" | "guest";
+  role: "owner" | "admin" | "auditor" | "member" | "guest";
 }
 
 export interface Vault {

@@ -8,7 +8,9 @@ import {
   teamMembers,
   vaultMembers,
   vaultTeamMembers,
+  vaults,
 } from "@/db/schema";
+import { getOrgMembership } from "./orgAccess";
 
 // ---------------------------------------------------------------------------
 // Granular access engine — DESIGN.md §11.3 "most specific wins".
@@ -154,7 +156,21 @@ export async function resolveItemRole(
     ...vaultUserGrant,
     ...vaultTeamGrants
   ]);
-  return vaultRole;
+  if (vaultRole) return vaultRole;
+
+  // 4. Auditor level (org-wide read-only access)
+  const vaultRows = await db
+    .select({ orgId: vaults.orgId })
+    .from(vaults)
+    .where(eq(vaults.id, item.vaultId))
+    .limit(1);
+  const vaultRow = vaultRows[0];
+  if (vaultRow) {
+    const orgMem = await getOrgMembership(vaultRow.orgId, userId);
+    if (orgMem?.role === "auditor") return "viewer";
+  }
+
+  return null;
 }
 
 // Resolve the effective role for (user, folder): folder grant → vault
@@ -215,7 +231,21 @@ export async function resolveFolderRole(
     ...vaultUserGrant,
     ...vaultTeamGrants
   ]);
-  return vaultRole;
+  if (vaultRole) return vaultRole;
+
+  // 4. Auditor level (org-wide read-only access)
+  const vaultRows = await db
+    .select({ orgId: vaults.orgId })
+    .from(vaults)
+    .where(eq(vaults.id, folder.vaultId))
+    .limit(1);
+  const vaultRow = vaultRows[0];
+  if (vaultRow) {
+    const orgMem = await getOrgMembership(vaultRow.orgId, userId);
+    if (orgMem?.role === "auditor") return "viewer";
+  }
+
+  return null;
 }
 
 /** Helper to pick the highest role among multiple applicable grants. */

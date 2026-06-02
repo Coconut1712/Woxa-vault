@@ -205,13 +205,16 @@ function ForgotPassword() {
               id="fp-code"
               value={recoveryCode}
               onChange={(e) => setRecoveryCode(e.target.value)}
-              placeholder={t("forgot_password.code_placeholder")}
+              placeholder={t("forgot_password.mnemonic_placeholder")}
               required
-              rows={3}
+              rows={4}
               autoComplete="off"
               spellCheck={false}
-              className="font-mono-secret text-sm"
+              className="font-mono-secret text-sm leading-relaxed"
             />
+            <p className="text-[10px] text-muted-foreground">
+              {t("forgot_password.mnemonic_hint")}
+            </p>
           </div>
 
           <div className="space-y-1.5">

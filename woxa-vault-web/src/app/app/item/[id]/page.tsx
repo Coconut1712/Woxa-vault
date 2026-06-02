@@ -24,6 +24,7 @@ import { Topbar } from "@/components/layout/topbar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ShareDialog } from "@/components/vault/share-dialog";
+import { MemberAvatars } from "@/components/vault/member-avatars";
 import {
   Dialog,
   DialogContent,
@@ -48,12 +49,14 @@ import {
   deleteDisplayItem,
   getDisplayItem,
   getItemPassword,
+  getDisplayItemMembers,
   toggleFavorite,
   type DisplayItemFull,
+  type VaultMember,
 } from "@/lib/items-overlay";
 import { getVault } from "@/lib/api/vaults";
 import { ApiError, VAULT_UNLOCKED_EVENT } from "@/lib/api/client";
-import type { Vault } from "@/lib/api/types";
+import type { Vault, VaultRole } from "@/lib/api/types";
 import { useVaults } from "@/lib/vaults/provider";
 import { useFolders } from "@/lib/folders/provider";
 import { formatDateTime, itemTypeColor } from "@/lib/format";
@@ -86,6 +89,7 @@ export default function ItemDetailPage({
   const [vault, setVault] = useState<Vault | null>(null);
   const [itemError, setItemError] = useState<ApiError | null>(null);
   const [loading, setLoading] = useState(true);
+  const [members, setMembers] = useState<VaultMember[]>([]);
 
   const [editOpen, setEditOpen] = useState(false);
   // The item snapshot handed to EditItemDialog — same as `item` but with the
@@ -132,23 +136,24 @@ export default function ItemDetailPage({
     try {
       // We need vault context to know if it's ZK before calling getDisplayItem
       // (or let getDisplayItem handle it by fetching vault internally)
-      // For now, let's peek the vault list or fetch detail
-      const { items: allItems } = await import("@/lib/api/items"); // direct fetch to avoid overlay
-      const itemRow = await allItems.getItem(id);
-      
-      const targetVault = vaults.find(v => v.id === itemRow.vaultId);
-      const vaultKey = targetVault?.encryptionVersion === 2 
-        ? await getVaultKey(itemRow.vaultId) 
-        : undefined;
+      const apiItems = await import("@/lib/api/items"); // direct fetch to avoid overlay
+      const itemRow = await apiItems.getItem(id);
 
-      const fetched = await getDisplayItem(id, undefined, vaultKey ?? undefined);
+      const targetVault = vaults.find((v) => v.id === itemRow.vaultId);
+      const vaultKey =
+        targetVault?.encryptionVersion === 2
+          ? await getVaultKey(itemRow.vaultId)
+          : undefined;
+
+      const [fetched, detail, memberRes] = await Promise.all([
+        getDisplayItem(id, undefined, vaultKey ?? undefined),
+        getVault(itemRow.vaultId),
+        getDisplayItemMembers(id),
+      ]);
+
       setItem(fetched);
-      try {
-        const detail = await getVault(fetched.vaultId);
-        setVault(detail.vault);
-      } catch {
-        setVault(null);
-      }
+      setVault(detail.vault);
+      setMembers(memberRes.members);
     } catch (err) {
       if (err instanceof ApiError) setItemError(err);
       else setItemError(new ApiError(0, "network_error", "Network error"));
@@ -273,23 +278,31 @@ export default function ItemDetailPage({
   const effectiveRole =
     item.effectiveRole ?? vault?.role ?? item.displayEffectiveRole;
 
+  // Auditor role cannot request access to secrets (strict metadata-only).
+  const isAuditor = me?.role === "auditor";
+  const canRequest = !isAuditor;
+
   // An effective viewer gets metadata-only (backend returns null secrets).
   const isViewOnly = !canRevealItem(effectiveRole);
 
   // Edit/delete: effective role manager|editor|user AND org-write.
   const canEdit = canEditItemRole(effectiveRole) && canWrite;
   // Share: effective editor|manager OR the item's creator. AND org-write.
-  const canShareItem =
+  const canManageItemMembers =
     canWrite &&
     (canShareResourceRole(effectiveRole) || item.createdBy.id === me?.id);
+  // Auditor can see who has access for compliance, but cannot manage.
+  const canOpenShare = canManageItemMembers || isAuditor;
+  const canViewMembers = canWrite || isAuditor;
+
   // Creating a one-time send is a write op (POST /sends → 403 for guests) and
   // requires reveal access to the secret.
   const canSend = canWrite && !isViewOnly;
   // Per-item activity feed: mirrors GET /items/:id/activity (200 only for an
-  // effective vault MANAGER OR an org admin/owner). Editor/user/viewer must NOT
+  // effective vault MANAGER OR an org admin/owner/auditor). Editor/user/viewer must NOT
   // see it and we skip the fetch for them (it would 403).
   const canSeeActivity =
-    effectiveRole === "manager" || isWorkspaceAdmin(me?.role ?? null);
+    effectiveRole === "manager" || canViewAuditLog(me?.role ?? null);
   // The "View full audit log" link goes to /app/audit, which is admin-only and
   // redirects non-admins. So a manager who is just an org member sees the
   // per-item list but NOT the link; only admins/owners see both.
@@ -313,6 +326,7 @@ export default function ItemDetailPage({
             <Button
               variant="ghost"
               size="icon"
+              disabled={isAuditor}
               onClick={handleToggleFavorite}
               aria-label={
                 item.displayFavorite
@@ -334,6 +348,12 @@ export default function ItemDetailPage({
                 className={`size-4 ${item.displayFavorite ? "fill-current" : ""}`}
               />
             </Button>
+            {canViewMembers && (
+              <MemberAvatars
+                members={members}
+                onClick={() => setShareOpen(true)}
+              />
+            )}
             {canEdit && (
               <Button
                 variant="outline"
@@ -343,7 +363,7 @@ export default function ItemDetailPage({
                 <Edit2 className="size-3.5" /> {tr("item.edit")}
               </Button>
             )}
-            {canShareItem && (
+            {canManageItemMembers && (
               <Button
                 variant="outline"
                 size="sm"
@@ -451,14 +471,16 @@ export default function ItemDetailPage({
                   </p>
                 </div>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setRequestOpen(true)}
-                className="shrink-0 border-amber-500/30 bg-transparent text-amber-700 dark:text-amber-400 hover:bg-amber-500/10"
-              >
-                <Lock className="size-3.5" /> {tr("requests.button")}
-              </Button>
+              {canRequest && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setRequestOpen(true)}
+                  className="shrink-0 border-amber-500/30 bg-transparent text-amber-700 dark:text-amber-400 hover:bg-amber-500/10"
+                >
+                  <Lock className="size-3.5" /> {tr("requests.button")}
+                </Button>
+              )}
             </div>
           )}
 
@@ -745,8 +767,10 @@ export default function ItemDetailPage({
         resourceKind="item"
         resourceId={item.id}
         resourceName={item.name}
-        canManage={canShareItem}
+        canManage={canManageItemMembers}
         currentUserId={me?.id}
+        initialMembers={members}
+        onMembersChange={setMembers}
       />
 
       <RequestAccessDialog

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { and, asc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
-import { auditEvents, teamMembers, teams, users, vaultMembers, vaultTeamMembers, vaultKeys } from "@/db/schema";
+import { auditEvents, teamMembers, teams, users, vaultMembers, vaultTeamMembers, vaultKeys, vaults } from "@/db/schema";
 import { errors } from "@/lib/errors";
 import { hashIp } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
@@ -10,6 +10,7 @@ import { getOrgMembership } from "@/lib/orgAccess";
 import { createNotification } from "@/lib/notifications";
 import { jsonValidator, paramValidator } from "@/lib/validator";
 import {
+  activeOrgForContext,
   blockGuestWrites,
   requireAuth,
   requireTwoFactorEnrolled,
@@ -132,8 +133,20 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
     const user = c.get("user")!;
     const { id } = c.req.valid("param");
 
+    const activeOrg = await activeOrgForContext(c);
+    const isAuditor = activeOrg?.role === "auditor";
+
     const access = await loadVaultForUser(id, user.id);
-    if (!access) throw errors.notFound("Vault not found");
+    if (!access && !isAuditor) throw errors.notFound("Vault not found");
+
+    if (isAuditor) {
+      const [vault] = await db
+        .select({ orgId: vaults.orgId })
+        .from(vaults)
+        .where(eq(vaults.id, id))
+        .limit(1);
+      if (!vault || vault.orgId !== activeOrg?.orgId) throw errors.notFound("Vault not found");
+    }
 
     const rows = await db
       .select({
@@ -165,8 +178,20 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
     const user = c.get("user")!;
     const { id } = c.req.valid("param");
 
+    const activeOrg = await activeOrgForContext(c);
+    const isAuditor = activeOrg?.role === "auditor";
+
     const access = await loadVaultForUser(id, user.id);
-    if (!access) throw errors.notFound("Vault not found");
+    if (!access && !isAuditor) throw errors.notFound("Vault not found");
+
+    if (isAuditor) {
+      const [vault] = await db
+        .select({ orgId: vaults.orgId })
+        .from(vaults)
+        .where(eq(vaults.id, id))
+        .limit(1);
+      if (!vault || vault.orgId !== activeOrg?.orgId) throw errors.notFound("Vault not found");
+    }
 
     const rows = await db
       .select({

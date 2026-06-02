@@ -198,21 +198,22 @@ export const requireTwoFactorEnrolled: MiddlewareHandler<{
 };
 
 // ---------------------------------------------------------------------------
-// blockGuestWrites — org-level READ-ONLY enforcement for the `guest` role.
+// blockGuestWrites — org-level READ-ONLY enforcement for `guest` and `auditor`.
 // ---------------------------------------------------------------------------
 //
 // Threat model:
 //   Asset: every mutating secret-bearing endpoint — create/edit/delete of
 //     vaults, items, folders and attachments; one-time send create/burn; and
 //     vault-membership (share) changes.
-//   Policy (owner directive 2026-05-21): a `guest` org member is READ-ONLY.
-//     They may list / read / reveal / copy items in the vaults explicitly
-//     shared with them (via vault membership), but may NOT create, edit,
+//   Policy (owner directive 2026-05-21): a `guest` or `auditor` org member is
+//     READ-ONLY. They may list / read / reveal / copy items (guests only)
+//     in the vaults explicitly shared with them (via vault membership) or
+//     visible to them (auditors see all), but may NOT create, edit,
 //     delete or share anything — REGARDLESS of the vault role they were
 //     granted. So even a guest added to a vault as `manager` cannot mutate.
-//   Adversary: a guest who ignores the read-only UI and calls the JSON API
-//     directly (curl / extension / stale SPA). Frontend hiding is not a
-//     security boundary — this server gate is.
+//   Adversary: a guest or auditor who ignores the read-only UI and calls the
+//     JSON API directly (curl / extension / stale SPA). Frontend hiding is
+//     not a security boundary — this server gate is.
 //
 // Design choices:
 //   * Method-scoped: GET/HEAD/OPTIONS pass through untouched so reveals,
@@ -236,8 +237,8 @@ export const blockGuestWrites: MiddlewareHandler<{ Variables: AuthVariables }> =
   const user = c.get("user");
   if (!user) return next(); // requireAuth handles the 401 for anonymous callers
   const current = await activeOrgForContext(c);
-  if (current?.role === "guest") {
-    throw errors.forbidden("Guests have read-only access and cannot modify vault data");
+  if (current?.role === "guest" || current?.role === "auditor") {
+    throw errors.forbidden("Access restricted: your role has read-only access and cannot modify data");
   }
   return next();
 };

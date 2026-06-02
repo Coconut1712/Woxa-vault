@@ -1,6 +1,6 @@
 import type { ColorKey } from "@/lib/types";
 
-export type MemberRole = "owner" | "admin" | "member" | "guest";
+export type MemberRole = "owner" | "admin" | "auditor" | "member" | "guest";
 export type MemberStatus = "active" | "invited" | "suspended";
 
 export interface Member {

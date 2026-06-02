@@ -214,20 +214,6 @@ export const itemAttachmentRoutes = new Hono<{ Variables: AuthVariables }>()
       .where(and(eq(attachments.itemId, id), isNull(attachments.deletedAt)))
       .orderBy(desc(attachments.createdAt));
 
-    await db.insert(auditEvents).values({
-      orgId: itemWithVault.orgId,
-      actorUserId: user.id,
-      actorEmail: user.email,
-      action: "item.attachments_viewed",
-      targetType: "item",
-      targetId: id,
-      targetName: itemWithVault.name,
-      ipHash: hashIp(getClientIp(c)),
-      userAgent: c.req.header("user-agent") ?? null,
-      success: true,
-      metadata: { attachmentCount: rows.length },
-    });
-
     return c.json({ attachments: rows.map(toDTO) });
   })
 

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { and, asc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
-import { auditEvents, folderMembers, folderTeamMembers, folders, teamMembers, teams, users, type Folder } from "@/db/schema";
+import { auditEvents, folderMembers, folderTeamMembers, folders, teamMembers, teams, users, vaults, type Folder } from "@/db/schema";
 import { errors } from "@/lib/errors";
 import { hashIp } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
@@ -17,6 +17,7 @@ import {
 import { createNotification } from "@/lib/notifications";
 import { jsonValidator, paramValidator } from "@/lib/validator";
 import {
+  activeOrgForContext,
   blockGuestWrites,
   requireAuth,
   requireTwoFactorEnrolled,
@@ -116,8 +117,22 @@ export const folderMemberRoutes = new Hono<{ Variables: AuthVariables }>()
   .get("/:id/members", paramValidator(folderParam), async (c) => {
     const user = c.get("user")!;
     const { id } = c.req.valid("param");
+
+    const activeOrg = await activeOrgForContext(c);
+    const isAuditor = activeOrg?.role === "auditor";
+
     const ctx = await loadFolderContext(id, user.id);
-    if (!ctx) throw errors.notFound("Folder not found");
+    if (!ctx && !isAuditor) throw errors.notFound("Folder not found");
+
+    if (isAuditor) {
+      const [folderRow] = await db
+        .select({ orgId: vaults.orgId })
+        .from(folders)
+        .innerJoin(vaults, eq(folders.vaultId, vaults.id))
+        .where(eq(folders.id, id))
+        .limit(1);
+      if (!folderRow || folderRow.orgId !== activeOrg?.orgId) throw errors.notFound("Folder not found");
+    }
 
     const rows = await db
       .select({
@@ -135,8 +150,22 @@ export const folderMemberRoutes = new Hono<{ Variables: AuthVariables }>()
   .get("/:id/team-members", paramValidator(folderParam), async (c) => {
     const user = c.get("user")!;
     const { id } = c.req.valid("param");
+
+    const activeOrg = await activeOrgForContext(c);
+    const isAuditor = activeOrg?.role === "auditor";
+
     const ctx = await loadFolderContext(id, user.id);
-    if (!ctx) throw errors.notFound("Folder not found");
+    if (!ctx && !isAuditor) throw errors.notFound("Folder not found");
+
+    if (isAuditor) {
+      const [folderRow] = await db
+        .select({ orgId: vaults.orgId })
+        .from(folders)
+        .innerJoin(vaults, eq(folders.vaultId, vaults.id))
+        .where(eq(folders.id, id))
+        .limit(1);
+      if (!folderRow || folderRow.orgId !== activeOrg?.orgId) throw errors.notFound("Folder not found");
+    }
 
     const rows = await db
       .select({ teamId: folderTeamMembers.teamId, role: folderTeamMembers.role, teamName: teams.name })

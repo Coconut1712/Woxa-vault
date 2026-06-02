@@ -14,6 +14,7 @@ import type { LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api/client";
 import { useT } from "@/lib/i18n/provider";
+import { useAuth } from "@/lib/auth/provider";
 
 interface ErrorStateProps {
   error: ApiError;
@@ -24,6 +25,7 @@ interface ErrorStateProps {
 
 export function ApiErrorState({ error, onRetry, variant = "page" }: ErrorStateProps) {
   const t = useT();
+  const { me } = useAuth();
 
   const isForbidden = error.code === "forbidden";
   const isNotFound = error.code === "not_found";
@@ -35,8 +37,11 @@ export function ApiErrorState({ error, onRetry, variant = "page" }: ErrorStatePr
     : isNotFound
       ? t("api.error.not_found_title")
       : t("api.error.title");
+
   const description = isForbidden
-    ? t("api.error.forbidden_desc")
+    ? me?.role === "auditor"
+      ? t("api.error.forbidden_auditor_desc")
+      : t("api.error.forbidden_desc")
     : isNotFound
       ? t("api.error.not_found_desc")
       : isNetwork

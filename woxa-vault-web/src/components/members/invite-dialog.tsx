@@ -12,6 +12,7 @@ import {
   ShieldCheck as ShieldIcon,
   Users as UsersIcon,
   UserCog,
+  FileSearch,
   Sparkles,
   Globe,
 } from "lucide-react";
@@ -64,6 +65,10 @@ const roleIconColor: Record<
   admin: {
     icon: ShieldIcon,
     color: "bg-violet-500/10 text-violet-400 border-violet-500/20",
+  },
+  auditor: {
+    icon: FileSearch,
+    color: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
   },
   member: {
     icon: UsersIcon,
@@ -289,43 +294,45 @@ export function InviteMembersDialog({ open, onOpenChange }: Props) {
             <Label className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
               {t("invite.role")}
             </Label>
-            <div className="grid grid-cols-3 gap-2">
-              {(["admin", "member", "guest"] as MemberRole[]).map((r) => {
-                const cfg = roleIconColor[r];
-                const active = role === r;
-                return (
-                  <button
-                    key={r}
-                    onClick={() => setRole(r)}
-                    className={cn(
-                      "rounded-xl border bg-card/40 p-3 text-left transition-all",
-                      active
-                        ? "border-brand/40 bg-brand/[0.04]"
-                        : "border-line-1 hover:border-line-3 hover:bg-surface-1",
-                    )}
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <div
-                        className={cn(
-                          "size-6 rounded-md ring-1 flex items-center justify-center shrink-0",
-                          cfg.color,
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {(["admin", "auditor", "member", "guest"] as MemberRole[]).map(
+                (r) => {
+                  const cfg = roleIconColor[r];
+                  const active = role === r;
+                  return (
+                    <button
+                      key={r}
+                      onClick={() => setRole(r)}
+                      className={cn(
+                        "rounded-xl border bg-card/40 p-3 text-left transition-all",
+                        active
+                          ? "border-brand/40 bg-brand/[0.04]"
+                          : "border-line-1 hover:border-line-3 hover:bg-surface-1",
+                      )}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <div
+                          className={cn(
+                            "size-6 rounded-md ring-1 flex items-center justify-center shrink-0",
+                            cfg.color,
+                          )}
+                        >
+                          <cfg.icon className="size-3" />
+                        </div>
+                        {active && (
+                          <Check className="size-3.5 text-brand ml-auto" />
                         )}
-                      >
-                        <cfg.icon className="size-3" />
                       </div>
-                      <span className="text-sm font-semibold">
+                      <span className="text-xs font-semibold block">
                         {t(`members.role.${r}`)}
                       </span>
-                      {active && (
-                        <Check className="size-3.5 text-brand ml-auto" />
-                      )}
-                    </div>
-                    <p className="text-[11px] text-muted-foreground leading-relaxed">
-                      {t(`invite.role.${r}.desc`)}
-                    </p>
-                  </button>
-                );
-              })}
+                      <p className="text-[10px] text-muted-foreground leading-tight mt-1 line-clamp-2">
+                        {t(`invite.role.${r}.desc`)}
+                      </p>
+                    </button>
+                  );
+                },
+              )}
             </div>
           </div>
 

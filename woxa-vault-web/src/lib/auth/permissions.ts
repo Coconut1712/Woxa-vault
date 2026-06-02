@@ -32,25 +32,25 @@ export function isGuest(role: OrgRole | null): boolean {
   return role === "guest";
 }
 
-/** Workspace Settings page + nav link — owner/admin only. */
+/** Workspace Settings page + nav link — owner/admin/auditor only. */
 export function canViewWorkspaceSettings(role: OrgRole | null): boolean {
-  return isWorkspaceAdmin(role);
+  return role === "owner" || role === "admin" || role === "auditor";
 }
 
-/** Audit log page + nav link — owner/admin only (GET /audit is admin-only). */
+/** Audit log page + nav link — owner/admin/auditor only (GET /audit is admin-only). */
 export function canViewAuditLog(role: OrgRole | null): boolean {
-  return isWorkspaceAdmin(role);
+  return role === "owner" || role === "admin" || role === "auditor";
 }
 
 /**
  * May this role perform ANY vault data write (create / edit / delete / share /
- * move / send)? False for guests and for users with no workspace; true for
+ * move / send)? False for guests, auditors, and for users with no workspace; true for
  * member/admin/owner. NOTE: a `true` here is necessary but not sufficient — the
  * per-vault `vault.role` still narrows the action inside a specific vault. Use
  * this with AND alongside the existing vault-role checks.
  */
 export function canWriteVaultData(role: OrgRole | null): boolean {
-  return role != null && role !== "guest";
+  return role != null && role !== "guest" && role !== "auditor";
 }
 
 /* ---------------------------------------------------------------------------

@@ -178,19 +178,6 @@ export const auditRoutes = new Hono<{ Variables: AuthVariables }>()
       });
     }
 
-    await db.insert(auditEvents).values({
-      orgId: current.orgId,
-      actorUserId: user.id,
-      actorEmail: user.email,
-      action: "audit.log_viewed",
-      targetType: "organization",
-      targetId: current.orgId,
-      ipHash: hashIp(getClientIp(c)),
-      userAgent: c.req.header("user-agent") ?? null,
-      success: true,
-      metadata: { filter: q },
-    });
-
     return c.json({ events: page.map(toAuditDto), nextCursor });
   });
 

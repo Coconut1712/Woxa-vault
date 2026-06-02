@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { db } from "@/db/client";
-import { auditEvents, itemMembers, itemTeamMembers, items, teamMembers, teams, users, type Item } from "@/db/schema";
+import { auditEvents, itemMembers, itemTeamMembers, items, teamMembers, teams, users, vaults, type Item } from "@/db/schema";
 import { errors } from "@/lib/errors";
 import { hashIp } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
@@ -17,6 +17,7 @@ import {
 import { createNotification } from "@/lib/notifications";
 import { jsonValidator, paramValidator } from "@/lib/validator";
 import {
+  activeOrgForContext,
   blockGuestWrites,
   requireAuth,
   requireTwoFactorEnrolled,
@@ -117,8 +118,22 @@ export const itemMemberRoutes = new Hono<{ Variables: AuthVariables }>()
   .get("/:id/members", paramValidator(itemParam), async (c) => {
     const user = c.get("user")!;
     const { id } = c.req.valid("param");
+
+    const activeOrg = await activeOrgForContext(c);
+    const isAuditor = activeOrg?.role === "auditor";
+
     const ctx = await loadItemContext(id, user.id);
-    if (!ctx) throw errors.notFound("Item not found");
+    if (!ctx && !isAuditor) throw errors.notFound("Item not found");
+
+    if (isAuditor) {
+      const [itemRow] = await db
+        .select({ orgId: vaults.orgId })
+        .from(items)
+        .innerJoin(vaults, eq(items.vaultId, vaults.id))
+        .where(eq(items.id, id))
+        .limit(1);
+      if (!itemRow || itemRow.orgId !== activeOrg?.orgId) throw errors.notFound("Item not found");
+    }
 
     const rows = await db
       .select({
@@ -136,8 +151,22 @@ export const itemMemberRoutes = new Hono<{ Variables: AuthVariables }>()
   .get("/:id/team-members", paramValidator(itemParam), async (c) => {
     const user = c.get("user")!;
     const { id } = c.req.valid("param");
+
+    const activeOrg = await activeOrgForContext(c);
+    const isAuditor = activeOrg?.role === "auditor";
+
     const ctx = await loadItemContext(id, user.id);
-    if (!ctx) throw errors.notFound("Item not found");
+    if (!ctx && !isAuditor) throw errors.notFound("Item not found");
+
+    if (isAuditor) {
+      const [itemRow] = await db
+        .select({ orgId: vaults.orgId })
+        .from(items)
+        .innerJoin(vaults, eq(items.vaultId, vaults.id))
+        .where(eq(items.id, id))
+        .limit(1);
+      if (!itemRow || itemRow.orgId !== activeOrg?.orgId) throw errors.notFound("Item not found");
+    }
 
     const rows = await db
       .select({ teamId: itemTeamMembers.teamId, role: itemTeamMembers.role, teamName: teams.name })

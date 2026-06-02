@@ -44,14 +44,14 @@ export default function UpgradePage() {
       // Phase C: Generate ZK Keys from existing password
       // The user enters their CURRENT master password to derive the keys.
       const masterKey = await deriveMasterKey(password, me.id);
-      const authKeyHash = await deriveAuthKeyHash(masterKey, me.id);
+      const masterAuthKeyHash = await deriveAuthKeyHash(masterKey, me.id);
       
       const { publicKey, privateKey } = generateUserKeypair();
       const encrypted = await encryptPrivateKey(privateKey, masterKey);
 
       await setupPassword({ 
         password, // Re-sending current password is fine as we are updating the hash to ZK format
-        authKeyHash,
+        masterAuthKeyHash,
         publicKey: toBase64(publicKey),
         encryptedPrivateKey: toBase64(encrypted.ciphertext),
         privateKeyIv: toBase64(encrypted.iv),

@@ -4,15 +4,16 @@ import { orgMembers } from "@/db/schema";
 
 // Org role hierarchy: owner > admin > member > guest. We accept any role text
 // at the DB layer (DESIGN.md §3) but the API surface narrows to this union.
-export const ORG_ROLES = ["owner", "admin", "member", "guest"] as const;
+export const ORG_ROLES = ["owner", "admin", "auditor", "member", "guest"] as const;
 export type OrgRole = (typeof ORG_ROLES)[number];
 
 // Numeric rank for the single-owner hierarchy (DESIGN.md §3 — Owner > Admin >
 // Member > Guest). Higher = more privileged. Use `outranks()` rather than
 // comparing role strings ad hoc so the precedence rule lives in one place.
 const ROLE_RANK: Record<OrgRole, number> = {
-  owner: 3,
-  admin: 2,
+  owner: 4,
+  admin: 3,
+  auditor: 2,
   member: 1,
   guest: 0,
 };
@@ -29,7 +30,7 @@ export function outranks(actor: OrgRole, target: OrgRole): boolean {
 // hands ONLY through `POST /workspace/transfer-ownership`, which atomically
 // demotes the previous owner to keep the single-owner invariant. Granting
 // `owner` directly via PATCH would create a second owner and break the index.
-export const ASSIGNABLE_ORG_ROLES = ["admin", "member", "guest"] as const;
+export const ASSIGNABLE_ORG_ROLES = ["admin", "auditor", "member", "guest"] as const;
 export type AssignableOrgRole = (typeof ASSIGNABLE_ORG_ROLES)[number];
 
 export function isOwner(role: OrgRole): boolean {
@@ -74,7 +75,7 @@ export async function currentOrgForUser(
 //     * A multi-workspace user whose `sessions.active_org_id` points at org B
 //       while their session was minted before they joined B, or after they
 //       LEFT B (stale pointer) — must not act on B.
-//     * A forged/tampered active_org_id naming an org the caller never joined
+//     * A foraged/tampered active_org_id naming an org the caller never joined
 //       (IDOR) — must not act on it.
 //     * A user who is owner of org A and member of org B switching to B and
 //       expecting A's owner powers to carry over (privilege escalation across
@@ -161,5 +162,5 @@ export function canManageOrgMembers(role: OrgRole): boolean {
 // Admins/owners get the broad audit view (all org events). Everyone else only
 // sees rows where they are the actor.
 export function canViewAllOrgAudit(role: OrgRole): boolean {
-  return role === "owner" || role === "admin";
+  return role === "owner" || role === "admin" || role === "auditor";
 }

@@ -9,7 +9,7 @@
 
 import { apiFetch } from "./client";
 
-export type OrgRole = "owner" | "admin" | "member" | "guest";
+export type OrgRole = "owner" | "admin" | "auditor" | "member" | "guest";
 /** Roles assignable at invite time — `owner` is never granted via invite. */
 export type InviteRole = Exclude<OrgRole, "owner">;
 export type OrgMemberStatus = "active" | "disabled";

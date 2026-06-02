@@ -31,6 +31,7 @@ import {
   requireTwoFactorEnrolled,
   type AuthVariables,
 } from "@/middleware/auth";
+import { getOrgMembership } from "@/lib/orgAccess";
 import type { Context } from "hono";
 
 // ---------------------------------------------------------------------------
@@ -148,6 +149,10 @@ async function loadVaultForViewer(
     where: and(eq(vaults.id, vaultId), isNull(vaults.deletedAt)),
   });
   if (!vaultRow) return null;
+
+  // 0. Auditor role (org-wide read-only access)
+  const orgMem = await getOrgMembership(vaultRow.orgId, userId);
+  if (orgMem?.role === "auditor") return { vault: vaultRow, vaultRole: "viewer" };
 
   // 1. Direct vault role (User or Team)
   const access = await loadVaultForUser(vaultId, userId);
@@ -299,82 +304,81 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
   .get("/", async (c) => {
     const user = c.get("user")!;
 
-    const orgId = await activeOrgIdForContext(c);
-    if (!orgId) return c.json({ vaults: [] });
+    const activeOrg = await activeOrgForContext(c);
+    if (!activeOrg) return c.json({ vaults: [] });
+    const { orgId, role: orgRole } = activeOrg;
 
-    const rows = await db
-      .select({
-        vault: vaults,
-        role: vaultMembers.role,
-      })
-      .from(vaultMembers)
-      .innerJoin(vaults, eq(vaults.id, vaultMembers.vaultId))
-      .where(
-        and(
-          eq(vaultMembers.userId, user.id),
-          eq(vaults.orgId, orgId),
-          isNull(vaults.deletedAt),
-        ),
-      )
-      .orderBy(desc(vaults.updatedAt));
+    let allRows: { vault: Vault; role: Role }[] = [];
 
-    // DESIGN.md §11 surfacing: also include vaults the caller is NOT a member of
-    // but holds a folder or item grant inside (sub-grant-only). These render
-    // with role = "viewer" at the vault level (the caller can only see the
-    // shared subset; GET /vaults/:id/items computes per-item effective roles).
-    const memberVaultIds = new Set(rows.map((r) => r.vault.id));
+    if (orgRole === "auditor") {
+      const rows = await db.query.vaults.findMany({
+        where: and(eq(vaults.orgId, orgId), isNull(vaults.deletedAt)),
+        orderBy: desc(vaults.updatedAt),
+      });
+      allRows = rows.map((v) => ({ vault: v, role: "viewer" as Role }));
+    } else {
+      const rows = await db
+        .select({
+          vault: vaults,
+          role: vaultMembers.role,
+        })
+        .from(vaultMembers)
+        .innerJoin(vaults, eq(vaults.id, vaultMembers.vaultId))
+        .where(
+          and(
+            eq(vaultMembers.userId, user.id),
+            eq(vaults.orgId, orgId),
+            isNull(vaults.deletedAt),
+          ),
+        )
+        .orderBy(desc(vaults.updatedAt));
 
-    const folderGrantVaults = await db
-      .selectDistinct({ vault: vaults })
-      .from(folderMembers)
-      .innerJoin(folders, eq(folders.id, folderMembers.folderId))
-      .innerJoin(vaults, eq(vaults.id, folders.vaultId))
-      .where(
-        and(
-          eq(folderMembers.userId, user.id),
-          eq(vaults.orgId, orgId),
-          isNull(vaults.deletedAt),
-        ),
+      // DESIGN.md §11 surfacing: also include vaults the caller is NOT a member of
+      // but holds a folder or item grant inside (sub-grant-only). These render
+      // with role = "viewer" at the vault level (the caller can only see the
+      // shared subset; GET /vaults/:id/items computes per-item effective roles).
+      const memberVaultIds = new Set(rows.map((r) => r.vault.id));
+
+      const folderGrantVaults = await db
+        .selectDistinct({ vault: vaults })
+        .from(folderMembers)
+        .innerJoin(folders, eq(folders.id, folderMembers.folderId))
+        .innerJoin(vaults, eq(vaults.id, folders.vaultId))
+        .where(
+          and(
+            eq(folderMembers.userId, user.id),
+            eq(vaults.orgId, orgId),
+            isNull(vaults.deletedAt),
+          ),
+        );
+      const itemGrantVaults = await db
+        .selectDistinct({ vault: vaults })
+        .from(itemMembers)
+        .innerJoin(items, eq(items.id, itemMembers.itemId))
+        .innerJoin(vaults, eq(vaults.id, items.vaultId))
+        .where(
+          and(
+            eq(itemMembers.userId, user.id),
+            eq(vaults.orgId, orgId),
+            isNull(vaults.deletedAt),
+          ),
+        );
+
+      const subGrantRows: { vault: Vault; role: Role }[] = [];
+      for (const r of [...folderGrantVaults, ...itemGrantVaults]) {
+        if (memberVaultIds.has(r.vault.id)) continue;
+        if (subGrantRows.some((s) => s.vault.id === r.vault.id)) continue;
+        // Sub-grant-only callers surface the vault as a "viewer" at the vault
+        // chrome level; their real per-item access is finer-grained.
+        subGrantRows.push({ vault: r.vault, role: "viewer" });
+      }
+
+      allRows = [...rows.map(r => ({ vault: r.vault, role: r.role as Role })), ...subGrantRows].sort(
+        (a, b) => b.vault.updatedAt.getTime() - a.vault.updatedAt.getTime(),
       );
-    const itemGrantVaults = await db
-      .selectDistinct({ vault: vaults })
-      .from(itemMembers)
-      .innerJoin(items, eq(items.id, itemMembers.itemId))
-      .innerJoin(vaults, eq(vaults.id, items.vaultId))
-      .where(
-        and(
-          eq(itemMembers.userId, user.id),
-          eq(vaults.orgId, orgId),
-          isNull(vaults.deletedAt),
-        ),
-      );
-
-    const subGrantRows: { vault: Vault; role: Role }[] = [];
-    for (const r of [...folderGrantVaults, ...itemGrantVaults]) {
-      if (memberVaultIds.has(r.vault.id)) continue;
-      if (subGrantRows.some((s) => s.vault.id === r.vault.id)) continue;
-      // Sub-grant-only callers surface the vault as a "viewer" at the vault
-      // chrome level; their real per-item access is finer-grained.
-      subGrantRows.push({ vault: r.vault, role: "viewer" });
     }
 
-    const allRows = [...rows, ...subGrantRows].sort(
-      (a, b) => b.vault.updatedAt.getTime() - a.vault.updatedAt.getTime(),
-    );
-
     if (allRows.length === 0) {
-      await db.insert(auditEvents).values({
-        orgId,
-        actorUserId: user.id,
-        actorEmail: user.email,
-        action: "vault.list_viewed",
-        targetType: "organization",
-        targetId: orgId,
-        ipHash: hashIp(getClientIp(c)),
-        userAgent: c.req.header("user-agent") ?? null,
-        success: true,
-        metadata: { vaultCount: 0 },
-      });
       return c.json({ vaults: [] });
     }
 
@@ -393,19 +397,6 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
 
     const itemCountMap = new Map(itemCounts.map((r) => [r.vaultId, Number(r.c)]));
     const memberCountMap = new Map(memberCounts.map((r) => [r.vaultId, Number(r.c)]));
-
-    await db.insert(auditEvents).values({
-      orgId,
-      actorUserId: user.id,
-      actorEmail: user.email,
-      action: "vault.list_viewed",
-      targetType: "organization",
-      targetId: orgId,
-      ipHash: hashIp(getClientIp(c)),
-      userAgent: c.req.header("user-agent") ?? null,
-      success: true,
-      metadata: { vaultCount: allRows.length },
-    });
 
     return c.json({
       vaults: allRows.map((r) =>
@@ -519,19 +510,6 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
         wrappedKey = k.wrappedKey.toString("base64");
       }
     }
-
-    await db.insert(auditEvents).values({
-      orgId: access.vault.orgId,
-      actorUserId: user.id,
-      actorEmail: user.email,
-      action: "vault.view",
-      targetType: "vault",
-      targetId: id,
-      targetName: access.vault.name,
-      ipHash: hashIp(getClientIp(c)),
-      userAgent: c.req.header("user-agent") ?? null,
-      success: true,
-    });
 
     return c.json({
       vault: toFull(access.vault, vaultRole, itemCount, memberRows.length),

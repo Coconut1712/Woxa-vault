@@ -5,7 +5,7 @@ import { db } from "@/db/client";
 import { auditEvents, items, vaults } from "@/db/schema";
 import { errors } from "@/lib/errors";
 import { resolveItemRole } from "@/lib/access";
-import { canManageOrgMembers, getOrgMembership } from "@/lib/orgAccess";
+import { canManageOrgMembers, canViewAllOrgAudit, getOrgMembership } from "@/lib/orgAccess";
 import { paramValidator, queryValidator } from "@/lib/validator";
 import { toAuditDto } from "@/routes/audit";
 import { requireAuth, requireTwoFactorEnrolled, type AuthVariables } from "@/middleware/auth";
@@ -102,21 +102,21 @@ export const itemActivityRoutes = new Hono<{ Variables: AuthVariables }>()
     if (!vault) throw errors.notFound("Item not found");
     const orgId = vault.orgId;
 
-    // 3. No access at all (no effective item role AND not an admin/owner of the
-    // item's org) → 404 (anti-enumeration; don't reveal the item exists).
+    // 3. No access at all (no effective item role AND not an admin/owner/auditor
+    // of the item's org) → 404 (anti-enumeration; don't reveal the item exists).
     const orgMembership = await getOrgMembership(orgId, user.id);
-    const isOrgManager = orgMembership ? canManageOrgMembers(orgMembership.role) : false;
+    const isOrgAuditManager = orgMembership ? canViewAllOrgAudit(orgMembership.role) : false;
 
-    if (!itemRole && !isOrgManager) {
+    if (!itemRole && !isOrgAuditManager) {
       throw errors.notFound("Item not found");
     }
 
-    // 4. Allowed = effective item role is manager OR org owner/admin of the
+    // 4. Allowed = effective item role is manager OR org owner/admin/auditor of the
     // item's org. Otherwise the caller can SEE the item (editor/user/viewer)
-    // but is neither a manager nor an admin → 403.
-    const allowed = itemRole === "manager" || isOrgManager;
+    // but is neither a manager nor an admin/auditor → 403.
+    const allowed = itemRole === "manager" || isOrgAuditManager;
     if (!allowed) {
-      throw errors.forbidden("Only vault managers can view item activity");
+      throw errors.forbidden("Only vault managers or auditors can view item activity");
     }
 
     // 5. Fetch the item's events. ALWAYS pinned to (targetType='item', targetId,

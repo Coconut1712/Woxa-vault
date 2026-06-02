@@ -48,6 +48,7 @@ import { NewItemDialog } from "@/components/vault/new-item-dialog";
 import { NewFolderDialog } from "@/components/vault/new-folder-dialog";
 import { EditVaultDialog } from "@/components/vault/edit-vault-dialog";
 import { EditFolderDialog } from "@/components/vault/edit-folder-dialog";
+import { MemberAvatars } from "@/components/vault/member-avatars";
 import { EditItemDialog } from "@/components/vault/edit-item-dialog";
 import {
   ApiErrorState,
@@ -351,8 +352,13 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
   // Org-role gate: guests are read-only ANYWHERE regardless of their vault
   // role, so AND it into every write affordance. For non-guests this is true
   // and the existing per-vault role checks are unchanged.
-  const canWrite = canWriteVaultData(me?.role ?? null);
+  const role = me?.role ?? null;
+  const canWrite = canWriteVaultData(role);
+  const isAuditor = role === "auditor";
   const canManage = vault.role === "manager" && canWrite;
+  // Auditor can see who has access for compliance, but cannot manage.
+  const canViewMembers = canWrite || isAuditor;
+  
   // Create/edit content (new item, new/edit/delete folder). `user` is use-only,
   // so this is manager|editor only (mirrors backend canManageItem).
   const canEdit = canEditItemRole(vault.role) && canWrite;
@@ -394,26 +400,23 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
         title={vault.name}
         subtitle={vault.description ?? undefined}
         actions={
-          canWrite ? (
-            <>
-              {/* Avatars open the dialog for everyone (read-only for non-managers
-                  to see who has access); the explicit Share button — which adds
-                  people — is manager-only (mutations are manager-gated server-side). */}
+          <>
+            {canViewMembers && (
               <MemberAvatars
                 members={members}
                 onClick={() => setShareOpen(true)}
               />
-              {canManage && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setShareOpen(true)}
-                >
-                  <UserPlus className="size-3.5" /> {tr("vault.share")}
-                </Button>
-              )}
-            </>
-          ) : undefined
+            )}
+            {canManage && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShareOpen(true)}
+              >
+                <UserPlus className="size-3.5" /> {tr("vault.share")}
+              </Button>
+            )}
+          </>
         }
       />
 
@@ -976,68 +979,6 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
       </Dialog>
     </>
   );
-}
-
-/* =====================================================================
-   MEMBER AVATARS (compact stack in topbar)
-   ===================================================================== */
-function MemberAvatars({
-  members,
-  onClick,
-}: {
-  members: VaultMember[];
-  onClick: () => void;
-}) {
-  const tr = useT();
-  const visible = members.slice(0, 3);
-  const overflow = members.length - visible.length;
-  return (
-    <button
-      onClick={onClick}
-      aria-label={tr("item.manage_access")}
-      title={tr("vault.access_grants_aria", { n: members.length })}
-      className="flex items-center -space-x-1.5 hover:opacity-90 transition-opacity"
-    >
-      {visible.map((m) => (
-        <StackedAvatar key={m.userId} name={m.displayName || m.email} />
-      ))}
-      {overflow > 0 && (
-        <span className="size-6 rounded-full bg-surface-2 ring-2 ring-background flex items-center justify-center text-[9px] text-muted-foreground font-semibold tabular-nums">
-          +{overflow}
-        </span>
-      )}
-    </button>
-  );
-}
-
-function StackedAvatar({ name }: { name: string }) {
-  const c = colorFor("violet");
-  return (
-    <span
-      title={name}
-      className={cn(
-        "size-6 rounded-full ring-2 ring-background flex items-center justify-center",
-        c.bg,
-      )}
-    >
-      {looksLikeEmail(name) ? (
-        <AtSign className={cn("size-3", c.text)} />
-      ) : (
-        <span className={cn("text-[9px] font-semibold leading-none", c.text)}>
-          {name
-            .split(" ")
-            .map((p) => p[0])
-            .join("")
-            .slice(0, 2)
-            .toUpperCase()}
-        </span>
-      )}
-    </span>
-  );
-}
-
-function looksLikeEmail(s: string): boolean {
-  return s.includes("@") && !s.includes(" ");
 }
 
 /* =====================================================================

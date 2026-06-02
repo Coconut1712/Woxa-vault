@@ -72,9 +72,8 @@ export default function DashboardPage() {
 
   // Real dashboard data (replaces the old mock sends/audit + hardcoded stats).
   // The audit log is admin-only, so the recent-activity card + audit stat only
-  // load for owner/admin; sends + member counts load for everyone (guests get a
-  // 403 on members → shown as "—").
-  const isAdmin = canViewAuditLog(me?.role ?? null);
+  // load for owner/admin/auditor; sends + member counts load for everyone.
+  const canViewAudit = canViewAuditLog(me?.role ?? null);
   const [activeSendCount, setActiveSendCount] = useState<number | null>(null);
   const [memberCount, setMemberCount] = useState<number | null>(null);
   const [recentActivity, setRecentActivity] = useState<AuditEvent[] | null>(null);
@@ -90,8 +89,8 @@ export default function DashboardPage() {
       await Promise.allSettled([
         listSends(signal),
         listMembers(signal),
-        isAdmin ? listAudit({ limit: 50 }, signal) : Promise.resolve(null),
-        isAdmin ? listWorkspaceVaults(signal) : Promise.resolve(null),
+        canViewAudit ? listAudit({ limit: 50 }, signal) : Promise.resolve(null),
+        canViewAudit ? listWorkspaceVaults(signal) : Promise.resolve(null),
       ]);
     if (signal?.aborted) return;
     if (sendsRes.status === "fulfilled") {
@@ -109,7 +108,7 @@ export default function DashboardPage() {
     if (wsVaultsRes.status === "fulfilled" && wsVaultsRes.value) {
       setWorkspaceVaults(wsVaultsRes.value);
     }
-  }, [isAdmin]);
+  }, [canViewAudit]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -128,7 +127,7 @@ export default function DashboardPage() {
   const sendsStat = activeSendCount === null ? "—" : activeSendCount;
   const membersStat = memberCount === null ? "—" : memberCount;
   const auditStat =
-    !isAdmin || recentActivity === null
+    !canViewAudit || recentActivity === null
       ? "—"
       : auditHasMore
         ? `${recentActivity.length}+`
@@ -326,10 +325,10 @@ export default function DashboardPage() {
             )}
           </section>
 
-          {/* Workspace's vaults — owner/admin only: vaults that exist in the
+          {/* Workspace's vaults — owner/admin/auditor only: vaults that exist in the
               workspace the caller is NOT a member of. Inventory visibility only;
               these are NOT openable (the backend keeps items membership-gated). */}
-          {isAdmin && workspaceVaults && workspaceVaults.length > 0 && (
+          {canViewAudit && workspaceVaults && workspaceVaults.length > 0 && (
             <section>
               <SectionHeader title={t("dash.workspace_vaults")} />
               <p className="text-xs text-muted-foreground -mt-2 mb-3">
@@ -383,9 +382,9 @@ export default function DashboardPage() {
             </section>
           )}
 
-          {/* Recent activity — admin-only (the audit log is admin-only; the
-              backend 403s non-admins, so members/guests never see this card). */}
-          {isAdmin && (
+          {/* Recent activity — admin/auditor only (the audit log is restricted; the
+              backend 403s others, so members/guests never see this card). */}
+          {canViewAudit && (
             <section>
               <SectionHeader
                 title={t("dash.recent_activity")}

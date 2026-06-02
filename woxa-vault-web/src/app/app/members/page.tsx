@@ -10,6 +10,7 @@ import {
   Crown,
   Users as UsersIcon,
   UserCog,
+  FileSearch,
   Download,
   Clock,
   Trash2,
@@ -79,8 +80,9 @@ import { useT } from "@/lib/i18n/provider";
  * that slips through (e.g. role unknown while /auth/me races).
  */
 const ROLE_RANK: Record<OrgRole, number> = {
-  owner: 3,
-  admin: 2,
+  owner: 4,
+  admin: 3,
+  auditor: 2,
   member: 1,
   guest: 0,
 };
@@ -93,14 +95,14 @@ function outranks(actor: OrgRole, target: OrgRole): boolean {
 /**
  * Roles an actor may assign — every role strictly below their own, excluding
  * `owner` (never granted via PATCH/invite; ownership moves via transfer only).
- *   owner → [admin, member, guest]
- *   admin → [member, guest]
+ *   owner → [admin, auditor, member, guest]
+ *   admin → [auditor, member, guest]
  *   member/guest → [] (can't manage anyone)
  */
 function assignableRoles(actor: OrgRole | null): InviteRole[] {
   if (!actor) return [];
-  return (["admin", "member", "guest"] as InviteRole[]).filter((role) =>
-    outranks(actor, role),
+  return (["admin", "auditor", "member", "guest"] as InviteRole[]).filter(
+    (role) => outranks(actor, role),
   );
 }
 
@@ -117,6 +119,11 @@ const roleIconColor: Record<
     icon: ShieldCheck,
     color:
       "bg-violet-500/15 dark:bg-violet-500/10 text-violet-700 dark:text-violet-400 border-violet-500/30 dark:border-violet-500/20",
+  },
+  auditor: {
+    icon: FileSearch,
+    color:
+      "bg-emerald-500/15 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 dark:border-emerald-500/20",
   },
   member: {
     icon: UsersIcon,
@@ -239,7 +246,7 @@ export default function MembersPage() {
   // /auth/me or org_members row not yet provisioned) we keep it enabled and
   // let the backend enforce 403 if the caller actually lacks permission.
   const inviteDisabledReason =
-    currentRole === "member" || currentRole === "guest"
+    currentRole === "auditor" || currentRole === "member" || currentRole === "guest"
       ? t("members.invite.only_admin_tooltip")
       : undefined;
   const inviteDisabled = inviteDisabledReason !== undefined;
