@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Copy, Check } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/provider";
+import { copyWithAutoClear } from "@/lib/clipboard";
 
 function fakeTotp(seed: string, period: number): string {
   let hash = 0;
@@ -26,6 +27,12 @@ export function TotpField({ secret }: { secret: string }) {
     period - (Math.floor(Date.now() / 1000) % period),
   );
   const [copied, setCopied] = useState(false);
+  // Cancels the pending best-effort clipboard clear from the last copy.
+  const clearClipboardRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => clearClipboardRef.current?.();
+  }, []);
 
   useEffect(() => {
     const i = setInterval(() => {
@@ -37,9 +44,17 @@ export function TotpField({ secret }: { secret: string }) {
   }, [secret]);
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(code);
+    clearClipboardRef.current?.();
+    const { ok, cancel } = await copyWithAutoClear(code);
+    clearClipboardRef.current = cancel;
+    if (!ok) {
+      toast.error(t("toast.copy_failed"));
+      return;
+    }
     setCopied(true);
-    toast.success(t("totp.copied"));
+    toast.success(t("totp.copied"), {
+      description: t("secret.clipboard_clear"),
+    });
     setTimeout(() => setCopied(false), 1500);
   };
 

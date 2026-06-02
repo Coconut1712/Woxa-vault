@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Copy, Eye, EyeOff, Check, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/provider";
+import { copyWithAutoClear } from "@/lib/clipboard";
 
 interface SecretFieldProps {
   label: string;
@@ -40,6 +41,13 @@ export function SecretField({
   // Cache for an on-demand resolved secret. Once filled we never refetch.
   const [resolved, setResolved] = useState<string | null>(value ?? null);
   const [working, setWorking] = useState(false);
+  // Cancels the pending best-effort clipboard clear from the last copy, so a
+  // fresh copy supersedes the old timer and unmount doesn't leave it dangling.
+  const clearClipboardRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => clearClipboardRef.current?.();
+  }, []);
 
   // Keep the cache in sync if the parent passes a value directly (e.g. once it
   // has resolved an on-demand secret and re-renders with it).
@@ -99,16 +107,20 @@ export function SecretField({
     if (working) return;
     const v = await ensureValue();
     if (v === null) return;
-    try {
-      await navigator.clipboard.writeText(v);
-      setCopied(true);
-      toast.success(t("toast.field_copied", { label }), {
-        description: t("secret.clipboard_clear"),
-      });
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
+    // Supersede any clear still pending from a previous copy before scheduling
+    // the new one (AC-014.3 — real auto-clear after 30s).
+    clearClipboardRef.current?.();
+    const { ok, cancel } = await copyWithAutoClear(v);
+    clearClipboardRef.current = cancel;
+    if (!ok) {
       toast.error(t("toast.copy_failed"));
+      return;
     }
+    setCopied(true);
+    toast.success(t("toast.field_copied", { label }), {
+      description: t("secret.clipboard_clear"),
+    });
+    setTimeout(() => setCopied(false), 1500);
   };
 
   const plain = resolved ?? value ?? "";
