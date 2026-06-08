@@ -1,15 +1,17 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import {
   auditEvents,
   folderMembers,
   folders,
   itemMembers,
+  itemSearchTerms,
   itemTeamMembers,
   itemVersions,
   items,
+  organizations,
   teamMembers,
   teams,
   users,
@@ -18,15 +20,8 @@ import {
   type Vault,
 } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { hashIp, maskIp, clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
-import {
-  decryptField,
-  encryptField,
-  generateWrappedDek,
-  unwrapDek,
-  zeroize,
-} from "@/lib/itemCrypto";
 import { jsonValidator, paramValidator } from "@/lib/validator";
 import {
   activeOrgForContext,
@@ -46,11 +41,14 @@ import {
   canRevealItem,
   resolveFolderRole,
   resolveItemRole,
+  resolveItemRolesBatch,
   shareAuthorityForItem,
   type Role as AccessRole,
 } from "@/lib/access";
 import { getOrgMembership } from "@/lib/orgAccess";
 import { createNotification } from "@/lib/notifications";
+import { readOrgPolicy, clampRotationDays } from "@/lib/orgPolicy";
+import { computeRotationStatus, type RotationStatus } from "@/lib/rotation";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -69,6 +67,50 @@ const TYPES = ["login", "note", "api_key", "ssh", "card", "identity"] as const;
 const typeSchema = z.enum(TYPES);
 type ItemTypeName = (typeof TYPES)[number];
 
+// Phase C blind-index token (FR-043). The client sends HMAC-SHA256 digests
+// (32 raw bytes) base64-encoded. We pin the wire shape strictly: a 32-byte
+// digest is exactly 44 base64 chars (`...=` padded). Rejecting anything else
+// keeps junk / oversized blobs out of the search-terms table. Stored as bytea.
+const HMAC_B64_LEN = Math.ceil(32 / 3) * 4; // 44
+const zBase64Hash = z
+  .string()
+  .length(HMAC_B64_LEN)
+  .regex(/^[A-Za-z0-9+/]{43}=$/, "term must be a base64 HMAC-SHA256 digest");
+
+// Decode the base64 term list to 32-byte buffers, de-duplicated. Invalid
+// lengths are dropped defensively (Zod already gates the wire shape).
+function decodeSearchTerms(terms: string[] | undefined): Buffer[] {
+  if (!terms || terms.length === 0) return [];
+  const seen = new Set<string>();
+  const out: Buffer[] = [];
+  for (const t of terms) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    const buf = Buffer.from(t, "base64");
+    if (buf.length === 32) out.push(buf);
+  }
+  return out;
+}
+
+// Replace the entire blind-index term set for an item (FR-043). Delete-all +
+// insert inside the caller's transaction so a v2 update atomically swaps the
+// index. An empty `terms` array clears the item's terms (e.g. all searchable
+// fields removed). The server stores only the opaque hashes.
+async function replaceSearchTerms(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  itemId: string,
+  terms: Buffer[],
+): Promise<void> {
+  await tx.delete(itemSearchTerms).where(eq(itemSearchTerms.itemId, itemId));
+  if (terms.length === 0) return;
+  await tx
+    .insert(itemSearchTerms)
+    .values(terms.map((termHash) => ({ itemId, termHash })))
+    // Defensive: the (item_id, term_hash) PK rejects dup rows; ignore them so a
+    // client resending an identical token can't 500 the write.
+    .onConflictDoNothing();
+}
+
 const uuidParam = z.object({ id: z.string().uuid() });
 const vaultIdParam = z.object({ id: z.string().uuid() });
 
@@ -76,12 +118,19 @@ const vaultIdParam = z.object({ id: z.string().uuid() });
 // silently ignores them in round 2.
 const createSchema = z.object({
   type: typeSchema,
-  name: z.string().trim().min(1).max(120),
+  // Phase A / legacy v2: required non-empty label (validated by superRefine
+  // below). New v2 ZK items send "" here and supply nameCiphertext instead, so
+  // we relax the column-level rule to allow "" and enforce "name XOR
+  // nameCiphertext present" in the refine.
+  name: z.string().trim().max(120),
   username: z.string().trim().max(254).nullable().optional(),
   url: z.string().trim().max(2048).nullable().optional(),
   password: z.string().max(8192).nullable().optional(),
   notes: z.string().max(32768).nullable().optional(),
   folderId: z.string().uuid().nullable().optional(),
+  // US-060 / AC-060.1 / FR-039: per-item rotation window (days). null/0 = inherit
+  // the org default. Clamped server-side (clampRotationDays) before persisting.
+  rotationPolicyDays: z.number().int().nullable().optional(),
   tags: z.array(z.string()).optional(),
   favorite: z.boolean().optional(),
   totpSecret: z.string().nullable().optional(),
@@ -91,6 +140,30 @@ const createSchema = z.object({
   passwordIv: z.string().optional(), // base64
   notesCiphertext: z.string().optional(), // base64
   notesIv: z.string().optional(), // base64
+  // Phase C ZK metadata (FR-043 / AC-017.2): name/username/url as client
+  // ciphertext. When present the server stores ONLY these blobs and writes the
+  // plaintext columns as "" / NULL (see createSchema usage in the handler).
+  nameCiphertext: z.string().optional(), // base64
+  nameIv: z.string().optional(), // base64
+  usernameCiphertext: z.string().nullable().optional(), // base64
+  usernameIv: z.string().nullable().optional(), // base64
+  urlCiphertext: z.string().nullable().optional(), // base64
+  urlIv: z.string().nullable().optional(), // base64
+  // Phase C blind index (FR-043): opaque HMAC tokens (base64) the client
+  // derived from the searchable fields. Replaces the item's search-term set.
+  searchTerms: z.array(zBase64Hash).max(2000).optional(),
+}).superRefine((val, ctx) => {
+  // A name must arrive in exactly one shape: a non-empty plaintext label (v1 /
+  // legacy v2) OR a nameCiphertext blob (v2 ZK). Reject "" with no ciphertext
+  // (the old min(1) rule) and reject sending both (ambiguous).
+  const hasPlain = val.name.length > 0;
+  const hasCipher = val.nameCiphertext !== undefined && val.nameCiphertext.length > 0;
+  if (!hasPlain && !hasCipher) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "name or nameCiphertext is required", path: ["name"] });
+  }
+  if (hasPlain && hasCipher) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "send name OR nameCiphertext, not both", path: ["nameCiphertext"] });
+  }
 });
 
 const patchSchema = z.object({
@@ -104,11 +177,25 @@ const patchSchema = z.object({
   password: z.string().max(8192).nullable().optional(),
   notes: z.string().max(32768).nullable().optional(),
   folderId: z.string().uuid().nullable().optional(),
+  // US-060 / AC-060.1 / FR-039: update the per-item rotation window. null/0 =
+  // inherit the org default. Omit to leave unchanged.
+  rotationPolicyDays: z.number().int().nullable().optional(),
   // Phase C: ZK fields
   passwordCiphertext: z.string().optional(), // base64
   passwordIv: z.string().optional(),
   notesCiphertext: z.string().optional(),
   notesIv: z.string().optional(),
+  // Phase C ZK metadata (FR-043 / AC-017.2). Send the *Ciphertext key to
+  // replace; send null to clear (username/url only — name cannot be cleared).
+  nameCiphertext: z.string().optional(), // base64
+  nameIv: z.string().optional(), // base64
+  usernameCiphertext: z.string().nullable().optional(), // base64
+  usernameIv: z.string().nullable().optional(), // base64
+  urlCiphertext: z.string().nullable().optional(), // base64
+  urlIv: z.string().nullable().optional(), // base64
+  // Blind index: present (even []) → REPLACE the item's term set; omit → leave
+  // the existing terms untouched (e.g. a metadata-only PATCH like folderId).
+  searchTerms: z.array(zBase64Hash).max(2000).optional(),
 });
 
 const bulkRoleSchema = z.enum(["manager", "editor", "user", "viewer"]);
@@ -159,9 +246,21 @@ interface ItemSummary {
   vaultId: string;
   folderId: string | null;
   type: ItemTypeName;
+  // Phase A / legacy v2: plaintext label. New v2 items send "" here and carry
+  // the real name in nameCiphertext (FR-043). Frontend MUST prefer the
+  // ciphertext fields below when they are non-null.
   name: string;
   username: string | null;
   url: string | null;
+  // Phase C ZK metadata ciphertext (base64) — null on v1 + legacy v2 rows.
+  // When non-null the client decrypts these with the vault key and IGNORES the
+  // plaintext name/username/url above (which are "" / null for new v2 items).
+  nameCiphertext: string | null;
+  nameIv: string | null;
+  usernameCiphertext: string | null;
+  usernameIv: string | null;
+  urlCiphertext: string | null;
+  urlIv: string | null;
   tags: string[];
   favorite: boolean;
   hasPassword: boolean;
@@ -174,6 +273,16 @@ interface ItemSummary {
   // the item has never had a password. ISO-8601 string for the frontend to
   // render "password last changed X ago".
   passwordChangedAt: string | null;
+  // US-060 / FR-039: the item's OWN rotation window in days (NULL = inherit the
+  // org default). Surfaced so the edit form can show the per-item override.
+  rotationPolicyDays: number | null;
+  // US-060 / AC-060.3: computed rotation badge state from passwordChangedAt +
+  // the EFFECTIVE policy (item override ?? org default). `none` = no policy or
+  // no password. Computed in-row (no N+1).
+  rotationStatus: RotationStatus;
+  // ISO-8601 instant the password is due for rotation (= passwordChangedAt +
+  // effective days), or NULL when rotationStatus is `none`.
+  rotationDueAt: string | null;
   createdBy: { id: string; displayName: string };
   // Effective role of the CURRENT caller for this item (DESIGN.md §11 most-
   // specific-wins). Optional so single-item serializers that don't compute it
@@ -196,7 +305,16 @@ interface ItemFull extends ItemSummary {
 function toSummary(
   it: Item,
   creator: { id: string; displayName: string },
+  // US-060: org-wide default rotation days for the item's org. Passed in by the
+  // caller (resolved ONCE per request from organizations.settings) so the
+  // serializer stays N+1-free even when mapping a whole vault's items.
+  orgRotationDefaultDays: number | null = null,
 ): ItemSummary {
+  const rotation = computeRotationStatus(
+    it.passwordChangedAt,
+    it.rotationPolicyDays,
+    orgRotationDefaultDays,
+  );
   return {
     id: it.id,
     vaultId: it.vaultId,
@@ -205,6 +323,12 @@ function toSummary(
     name: it.name,
     username: it.username,
     url: it.url,
+    nameCiphertext: it.nameCiphertext?.toString("base64") ?? null,
+    nameIv: it.nameIv?.toString("base64") ?? null,
+    usernameCiphertext: it.usernameCiphertext?.toString("base64") ?? null,
+    usernameIv: it.usernameIv?.toString("base64") ?? null,
+    urlCiphertext: it.urlCiphertext?.toString("base64") ?? null,
+    urlIv: it.urlIv?.toString("base64") ?? null,
     tags: [],
     favorite: false,
     hasPassword: it.passwordCiphertext !== null,
@@ -214,8 +338,23 @@ function toSummary(
     updatedAt: it.updatedAt.toISOString(),
     lastUsedAt: it.lastUsedAt ? it.lastUsedAt.toISOString() : null,
     passwordChangedAt: it.passwordChangedAt ? it.passwordChangedAt.toISOString() : null,
+    rotationPolicyDays: it.rotationPolicyDays,
+    rotationStatus: rotation.status,
+    rotationDueAt: rotation.dueAt,
     createdBy: creator,
   };
+}
+
+// US-060: resolve the org-wide default rotation window (days) for a vault's org.
+// Reads organizations.settings via readOrgPolicy (total / fail-safe). Returns
+// null when the org has no default. One row read per request — the per-vault
+// list path resolves it ONCE and threads it through toSummary (no N+1).
+async function orgRotationDefaultFor(orgId: string): Promise<number | null> {
+  const org = await db.query.organizations.findFirst({
+    columns: { settings: true },
+    where: eq(organizations.id, orgId),
+  });
+  return readOrgPolicy(org?.settings).rotationDefaultDays;
 }
 
 async function creatorFor(item: Item): Promise<{ id: string; displayName: string }> {
@@ -266,6 +405,114 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
   .use("*", requireTwoFactorEnrolled)
   .use("*", blockGuestWrites)
 
+  // US-060 / AC-060.2 (FR-039): rotation dashboard feed. Returns the items in
+  // the caller's ACTIVE org whose password is `due` or `overdue` under the
+  // effective policy (item override ?? org default), plus the counts that drive
+  // the "N secrets need rotation" widget. Scoping:
+  //   * active org only (activeOrgForContext — never trusts client org input);
+  //   * RBAC: only items the caller can reach at SOME level (resolveItemRolesBatch
+  //     / auditor short-circuit) — identical anti-enumeration to GET /search;
+  //   * metadata-only: returns name + status + dueAt + effectiveRole, NEVER any
+  //     ciphertext / decrypted secret (a dashboard count is not a reveal). For v2
+  //     items the plaintext name is "" — the client decrypts nameCiphertext, so
+  //     we surface that blob (read-only metadata, same as the list/search path).
+  // MUST precede the generic `/:id` so `/rotation-due` isn't captured as an id.
+  .get("/rotation-due", async (c) => {
+    const user = c.get("user")!;
+    const activeOrg = await activeOrgForContext(c);
+    if (!activeOrg) return c.json({ items: [], counts: { due: 0, overdue: 0, total: 0 } });
+    const { orgId, role: orgRole } = activeOrg;
+
+    const orgRotationDefault = await orgRotationDefaultFor(orgId);
+
+    // Candidate fetch: live items in live, non-deleted vaults of the active org
+    // that HAVE a password (password_changed_at not null — no policy can apply
+    // without a password) AND have SOME effective policy. An item qualifies for a
+    // policy when it has its OWN positive rotationPolicyDays OR the org has a
+    // positive default. When there is no org default, only items with their own
+    // policy are candidates; when there IS an org default, every passworded item
+    // qualifies. Pushing this filter to SQL keeps the candidate set small.
+    const hasOrgDefault = orgRotationDefault !== null && orgRotationDefault > 0;
+    const policyFilter = hasOrgDefault
+      ? sql`(${items.rotationPolicyDays} is null or ${items.rotationPolicyDays} > 0)`
+      : sql`${items.rotationPolicyDays} > 0`;
+
+    const rows = await db
+      .select({ item: items, vaultName: vaults.name })
+      .from(items)
+      .innerJoin(vaults, eq(vaults.id, items.vaultId))
+      .where(
+        and(
+          eq(vaults.orgId, orgId),
+          isNull(items.deletedAt),
+          isNull(vaults.deletedAt),
+          isNotNull(items.passwordChangedAt),
+          policyFilter,
+        ),
+      );
+
+    // Compute status in-memory (no N+1 — every input is on the row) and keep only
+    // due/overdue. `fresh`/`none` items never reach the dashboard.
+    type DueRow = { item: Item; vaultName: string; status: "due" | "overdue"; dueAt: string };
+    const dueRows: DueRow[] = [];
+    for (const r of rows) {
+      const rot = computeRotationStatus(
+        r.item.passwordChangedAt,
+        r.item.rotationPolicyDays,
+        orgRotationDefault,
+      );
+      if (rot.status === "due" || rot.status === "overdue") {
+        dueRows.push({ item: r.item, vaultName: r.vaultName, status: rot.status, dueAt: rot.dueAt! });
+      }
+    }
+
+    // RBAC: resolve the caller's effective role per candidate and drop the ones
+    // they can't reach (auditor → org-wide viewer, same short-circuit as search).
+    const reachable: { row: DueRow; role: AccessRole }[] = [];
+    if (orgRole === "auditor") {
+      for (const row of dueRows) reachable.push({ row, role: "viewer" });
+    } else {
+      const roleMap = await resolveItemRolesBatch(
+        user.id,
+        dueRows.map((d) => ({ id: d.item.id, vaultId: d.item.vaultId, folderId: d.item.folderId })),
+      );
+      for (const row of dueRows) {
+        const role = roleMap.get(row.item.id) ?? null;
+        if (!role) continue;
+        reachable.push({ row, role });
+      }
+    }
+
+    // overdue first, then soonest-due. dueAt is the rotation deadline.
+    reachable.sort((a, b) => {
+      if (a.row.status !== b.row.status) return a.row.status === "overdue" ? -1 : 1;
+      return new Date(a.row.dueAt).getTime() - new Date(b.row.dueAt).getTime();
+    });
+
+    let overdue = 0;
+    let due = 0;
+    const out = reachable.map(({ row, role }) => {
+      if (row.status === "overdue") overdue++;
+      else due++;
+      return {
+        id: row.item.id,
+        vaultId: row.item.vaultId,
+        vaultName: row.vaultName,
+        type: row.item.type,
+        name: row.item.name,
+        nameCiphertext: row.item.nameCiphertext?.toString("base64") ?? null,
+        nameIv: row.item.nameIv?.toString("base64") ?? null,
+        rotationStatus: row.status,
+        rotationDueAt: row.dueAt,
+        rotationPolicyDays: row.item.rotationPolicyDays,
+        passwordChangedAt: row.item.passwordChangedAt!.toISOString(),
+        effectiveRole: role,
+      };
+    });
+
+    return c.json({ items: out, counts: { due, overdue, total: out.length } });
+  })
+
   // WARN-I: GET /items/:id/password is the REVEAL endpoint — the ONLY path that
   // returns the decrypted password. Gate it with `requireVaultUnlocked` so a
   // session-thief with a valid cookie cannot bypass the frontend lock screen by
@@ -284,60 +531,26 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
       throw errors.forbidden("Read-only access to this item");
     }
 
-    // Phase C: If ZK, return encrypted fields
-    if (access.vault.encryptionVersion === 2) {
-      await db.insert(auditEvents).values({
-        orgId: access.vault.orgId,
-        actorUserId: user.id,
-        actorEmail: user.email,
-        action: "item.reveal",
-        targetType: "item",
-        targetId: access.item.id,
-        targetName: access.item.name,
-        ipHash: hashIp(getClientIp(c)),
-        userAgent: c.req.header("user-agent") ?? null,
-        success: true,
-        metadata: { encryptionVersion: 2 },
-      });
+    // Zero-knowledge: hand back the ciphertext blobs; the client decrypts with
+    // the vault key. The server never sees plaintext.
+    await db.insert(auditEvents).values({
+      orgId: access.vault.orgId,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      action: "item.reveal",
+      targetType: "item",
+      targetId: access.item.id,
+      targetName: access.item.name,
+      ...clientIpAuditFields(c),
+      userAgent: c.req.header("user-agent") ?? null,
+      success: true,
+      metadata: { encryptionVersion: 2 },
+    });
 
-      return c.json({
-        passwordCiphertext: access.item.passwordCiphertext?.toString("base64"),
-        passwordIv: access.item.passwordIv?.toString("base64"),
-      });
-    }
-
-    // Phase A: Server-side mode
-    let dek: Buffer | null = null;
-    try {
-      const password =
-        access.item.passwordCiphertext && access.item.passwordIv
-          ? (() => {
-              dek = unwrapDek({
-                dekCiphertext: access.item.dekCiphertext!,
-                dekIv: access.item.dekIv!,
-              });
-              return decryptField(dek, access.item.passwordCiphertext, access.item.passwordIv);
-            })()
-          : null;
-
-      await db.insert(auditEvents).values({
-        orgId: access.vault.orgId,
-        actorUserId: user.id,
-        actorEmail: user.email,
-        action: "item.reveal",
-        targetType: "item",
-        targetId: access.item.id,
-        targetName: access.item.name,
-        ipHash: hashIp(getClientIp(c)),
-        userAgent: c.req.header("user-agent") ?? null,
-        success: true,
-        metadata: { encryptionVersion: 1 },
-      });
-
-      return c.json({ password });
-    } finally {
-      zeroize(dek);
-    }
+    return c.json({
+      passwordCiphertext: access.item.passwordCiphertext?.toString("base64"),
+      passwordIv: access.item.passwordIv?.toString("base64"),
+    });
   })
 
   // US-015 AC-015.2 / FR-037: list an item's version history (last 10).
@@ -427,65 +640,37 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "item",
           targetId: id,
           targetName: access.item.name,
-          ipHash: hashIp(getClientIp(c)),
+          ...clientIpAuditFields(c),
           userAgent: c.req.header("user-agent") ?? null,
           success: true,
           metadata: { version, encryptionVersion: encVersion },
         });
       };
 
-      // Phase C ZK: hand back the snapshot ciphertext blobs; client decrypts.
-      if (snap.encryptionVersion === 2) {
-        await audit(2);
-        return c.json({
-          version: snap.versionNumber,
-          type: snap.type,
-          name: snap.name,
-          username: snap.username,
-          url: snap.url,
-          passwordCiphertext: snap.passwordCiphertext?.toString("base64") ?? null,
-          passwordIv: snap.passwordIv?.toString("base64") ?? null,
-          notesCiphertext: snap.notesCiphertext?.toString("base64") ?? null,
-          notesIv: snap.notesIv?.toString("base64") ?? null,
-          createdAt: snap.modifiedAt.toISOString(),
-          editedByEmail: snap.modifiedByEmail,
-        });
-      }
-
-      // Phase A: unwrap the snapshot's OWN DEK, decrypt its fields, zeroize.
-      let dek: Buffer | null = null;
-      try {
-        const password =
-          snap.passwordCiphertext && snap.passwordIv && snap.dekCiphertext && snap.dekIv
-            ? (() => {
-                dek = unwrapDek({ dekCiphertext: snap.dekCiphertext!, dekIv: snap.dekIv! });
-                return decryptField(dek, snap.passwordCiphertext!, snap.passwordIv!);
-              })()
-            : null;
-        const notes =
-          snap.notesCiphertext && snap.notesIv && snap.dekCiphertext && snap.dekIv
-            ? (() => {
-                dek ??= unwrapDek({ dekCiphertext: snap.dekCiphertext!, dekIv: snap.dekIv! });
-                return decryptField(dek, snap.notesCiphertext!, snap.notesIv!);
-              })()
-            : null;
-
-        await audit(1);
-
-        return c.json({
-          version: snap.versionNumber,
-          type: snap.type,
-          name: snap.name,
-          username: snap.username,
-          url: snap.url,
-          password,
-          notes,
-          createdAt: snap.modifiedAt.toISOString(),
-          editedByEmail: snap.modifiedByEmail,
-        });
-      } finally {
-        zeroize(dek);
-      }
+      // Zero-knowledge: hand back the snapshot ciphertext blobs; client decrypts.
+      // For v2 ZK snapshots name="" / username/url NULL; the real values are in
+      // the *Ciphertext fields below for the client to decrypt with the vault key
+      // (same shape as the live item read path).
+      await audit(2);
+      return c.json({
+        version: snap.versionNumber,
+        type: snap.type,
+        name: snap.name,
+        username: snap.username,
+        url: snap.url,
+        nameCiphertext: snap.nameCiphertext?.toString("base64") ?? null,
+        nameIv: snap.nameIv?.toString("base64") ?? null,
+        usernameCiphertext: snap.usernameCiphertext?.toString("base64") ?? null,
+        usernameIv: snap.usernameIv?.toString("base64") ?? null,
+        urlCiphertext: snap.urlCiphertext?.toString("base64") ?? null,
+        urlIv: snap.urlIv?.toString("base64") ?? null,
+        passwordCiphertext: snap.passwordCiphertext?.toString("base64") ?? null,
+        passwordIv: snap.passwordIv?.toString("base64") ?? null,
+        notesCiphertext: snap.notesCiphertext?.toString("base64") ?? null,
+        notesIv: snap.notesIv?.toString("base64") ?? null,
+        createdAt: snap.modifiedAt.toISOString(),
+        editedByEmail: snap.modifiedByEmail,
+      });
     },
   )
 
@@ -503,10 +688,13 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     if (!access) throw errors.notFound("Item not found");
 
     const creator = await creatorFor(access.item);
-    const summary = toSummary(access.item, creator);
+    const orgRotationDefault = await orgRotationDefaultFor(access.vault.orgId);
+    const summary = toSummary(access.item, creator, orgRotationDefault);
     summary.effectiveRole = access.role;
 
-    const ipHashStr = hashIp(getClientIp(c));
+    const clientIp = getClientIp(c);
+    const ipHashStr = hashIp(clientIp);
+    const ipMaskedStr = maskIp(clientIp);
     const ua = c.req.header("user-agent") ?? null;
 
     // Debounce audit log for 10 seconds to prevent noisy React double-fetches
@@ -531,6 +719,7 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
           targetId: access.item.id,
           targetName: access.item.name,
           ipHash: ipHashStr,
+          ipMasked: ipMaskedStr,
           userAgent: ua,
           success: true,
           metadata: { encryptionVersion: version },
@@ -546,53 +735,24 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     // notes withheld (null). Auditor is org-wide read-only → never decrypts.
     const canReveal = canRevealItem(access.role) && !isAuditor;
 
-    // Phase C: If ZK, return encrypted fields
-    if (access.vault.encryptionVersion === 2) {
-      const full = {
-        ...summary,
-        password: null,
-        notes: null,
-        notesCiphertext: canReveal
-          ? access.item.notesCiphertext?.toString("base64")
-          : null,
-        notesIv: canReveal ? access.item.notesIv?.toString("base64") : null,
-        totpSecret: null,
-        customFields: [],
-      };
+    // Zero-knowledge: return the notes ciphertext blob (gated by canReveal); the
+    // client decrypts with the vault key. The password is WITHHELD here (lives
+    // behind GET /:id/password).
+    const full = {
+      ...summary,
+      password: null,
+      notes: null,
+      notesCiphertext: canReveal
+        ? access.item.notesCiphertext?.toString("base64")
+        : null,
+      notesIv: canReveal ? access.item.notesIv?.toString("base64") : null,
+      totpSecret: null,
+      customFields: [],
+    };
 
-      await recordAudit(2);
+    await recordAudit(2);
 
-      return c.json({ item: full });
-    }
-
-    // Phase A: Server-side mode
-    let dek: Buffer | null = null;
-    try {
-      const notes =
-        canReveal && access.item.notesCiphertext && access.item.notesIv
-          ? (() => {
-              dek = unwrapDek({
-                dekCiphertext: access.item.dekCiphertext!,
-                dekIv: access.item.dekIv!,
-              });
-              return decryptField(dek, access.item.notesCiphertext, access.item.notesIv);
-            })()
-          : null;
-
-      const full: ItemFull = {
-        ...summary,
-        password: null,
-        notes,
-        totpSecret: null,
-        customFields: [],
-      };
-
-      await recordAudit(1);
-
-      return c.json({ item: full });
-    } finally {
-      zeroize(dek);
-    }
+    return c.json({ item: full });
   })
 
   .patch("/:id", paramValidator(uuidParam), jsonValidator(patchSchema), async (c) => {
@@ -603,6 +763,35 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     const access = await loadItemForUser(id, user.id);
     if (!access) throw errors.notFound("Item not found");
     if (!canManageItem(access.role)) throw errors.forbidden("Read-only access to this vault");
+
+    // ZK enforcement (DESIGN §5 / FR-043 / AC-017.2): on a v2 (zero-knowledge)
+    // vault the server must never accept plaintext metadata. A patch may set
+    // name/username/url ONLY via its *Ciphertext counterpart; a raw plaintext
+    // `name`/`username`/`url` (non-null) is rejected so a misbehaving client
+    // cannot downgrade a ZK item to plaintext-at-rest. (nameCiphertext writes
+    // already blank the plaintext column below; this blocks the inverse.)
+    if (access.vault.encryptionVersion === 2) {
+      const plaintextMeta: Record<string, string[]> = {};
+      if (body.name !== undefined && body.nameCiphertext === undefined) {
+        plaintextMeta.name = ["plaintext name not allowed on v2 vault; send nameCiphertext"];
+      }
+      if (body.username != null && body.usernameCiphertext === undefined) {
+        plaintextMeta.username = ["plaintext username not allowed on v2 vault; send usernameCiphertext"];
+      }
+      if (body.url != null && body.urlCiphertext === undefined) {
+        plaintextMeta.url = ["plaintext url not allowed on v2 vault; send urlCiphertext"];
+      }
+      // Defense-in-depth: reject plaintext password on v2 vault. V1 removal
+      // deleted the code that stored `body.password` — a client sending it
+      // (e.g. stale client, locked vault fallback) would silently lose the
+      // secret. Return an explicit error so the user knows they need to unlock.
+      if (body.password != null && body.passwordCiphertext === undefined) {
+        plaintextMeta.password = ["plaintext password not allowed on v2 vault; send passwordCiphertext"];
+      }
+      if (Object.keys(plaintextMeta).length > 0) {
+        throw errors.validation("Validation failed", plaintextMeta);
+      }
+    }
 
     const patch: Partial<typeof items.$inferInsert> = { updatedAt: new Date() };
 
@@ -622,14 +811,8 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     // of a stale `password_changed_at` is cosmetic (a rotation-age badge), not a
     // security boundary, so we keep the cheap presence-based rule rather than add
     // an explicit `passwordChanged` flag the client could get wrong or spoof.
-    const pwPresent =
-      access.vault.encryptionVersion === 2
-        ? body.passwordCiphertext !== undefined
-        : body.password !== undefined;
-    const pwCleared =
-      access.vault.encryptionVersion === 2
-        ? body.passwordCiphertext === undefined || body.passwordCiphertext === ""
-        : body.password === null || body.password === "";
+    const pwPresent = body.passwordCiphertext !== undefined;
+    const pwCleared = body.passwordCiphertext === undefined || body.passwordCiphertext === "";
     const passwordChanged = pwPresent && !pwCleared;
     if (passwordChanged) patch.passwordChangedAt = new Date();
 
@@ -646,7 +829,10 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
       body.password !== undefined ||
       body.notes !== undefined ||
       body.passwordCiphertext !== undefined ||
-      body.notesCiphertext !== undefined;
+      body.notesCiphertext !== undefined ||
+      body.nameCiphertext !== undefined ||
+      body.usernameCiphertext !== undefined ||
+      body.urlCiphertext !== undefined;
 
     if (body.type !== undefined) patch.type = body.type;
     if (body.name !== undefined) patch.name = body.name;
@@ -664,51 +850,39 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
       patch.folderId = body.folderId;
     }
 
-    if (access.vault.encryptionVersion === 2) {
-      // Phase C: ZK mode - trust client ciphertexts
-      if (body.passwordCiphertext !== undefined) {
-        patch.passwordCiphertext = body.passwordCiphertext ? Buffer.from(body.passwordCiphertext, "base64") : null;
-        patch.passwordIv = body.passwordIv ? Buffer.from(body.passwordIv, "base64") : null;
-      }
-      if (body.notesCiphertext !== undefined) {
-        patch.notesCiphertext = body.notesCiphertext ? Buffer.from(body.notesCiphertext, "base64") : null;
-        patch.notesIv = body.notesIv ? Buffer.from(body.notesIv, "base64") : null;
-      }
-    } else {
-      // Phase A: Server-side mode
-      let dek: Buffer | null = null;
-      try {
-        const needsDek = body.password !== undefined || body.notes !== undefined;
-        if (needsDek) {
-          dek = unwrapDek({
-            dekCiphertext: access.item.dekCiphertext!,
-            dekIv: access.item.dekIv!,
-          });
-        }
+    // US-060: clamp the per-item rotation window. 0/negative → NULL (inherit
+    // org default). NOT a "content change" — rotation policy is metadata and
+    // must not create a version snapshot.
+    if (body.rotationPolicyDays !== undefined) {
+      patch.rotationPolicyDays = clampRotationDays(body.rotationPolicyDays);
+    }
 
-        if (body.password !== undefined) {
-          if (body.password === null || body.password === "") {
-            patch.passwordCiphertext = null;
-            patch.passwordIv = null;
-          } else {
-            const enc = encryptField(dek!, body.password);
-            patch.passwordCiphertext = enc.ciphertext;
-            patch.passwordIv = enc.iv;
-          }
-        }
-        if (body.notes !== undefined) {
-          if (body.notes === null || body.notes === "") {
-            patch.notesCiphertext = null;
-            patch.notesIv = null;
-          } else {
-            const enc = encryptField(dek!, body.notes);
-            patch.notesCiphertext = enc.ciphertext;
-            patch.notesIv = enc.iv;
-          }
-        }
-      } finally {
-        zeroize(dek);
-      }
+    // Zero-knowledge: trust the client ciphertext blobs verbatim.
+    if (body.passwordCiphertext !== undefined) {
+      patch.passwordCiphertext = body.passwordCiphertext ? Buffer.from(body.passwordCiphertext, "base64") : null;
+      patch.passwordIv = body.passwordIv ? Buffer.from(body.passwordIv, "base64") : null;
+    }
+    if (body.notesCiphertext !== undefined) {
+      patch.notesCiphertext = body.notesCiphertext ? Buffer.from(body.notesCiphertext, "base64") : null;
+      patch.notesIv = body.notesIv ? Buffer.from(body.notesIv, "base64") : null;
+    }
+    // ZK metadata (FR-043). When the client re-encrypts the name it sends
+    // nameCiphertext → also blank the plaintext `name` so the server stops
+    // holding it. username/url accept null = clear.
+    if (body.nameCiphertext !== undefined) {
+      patch.nameCiphertext = body.nameCiphertext ? Buffer.from(body.nameCiphertext, "base64") : null;
+      patch.nameIv = body.nameIv ? Buffer.from(body.nameIv, "base64") : null;
+      patch.name = "";
+    }
+    if (body.usernameCiphertext !== undefined) {
+      patch.usernameCiphertext = body.usernameCiphertext ? Buffer.from(body.usernameCiphertext, "base64") : null;
+      patch.usernameIv = body.usernameIv ? Buffer.from(body.usernameIv, "base64") : null;
+      patch.username = null;
+    }
+    if (body.urlCiphertext !== undefined) {
+      patch.urlCiphertext = body.urlCiphertext ? Buffer.from(body.urlCiphertext, "base64") : null;
+      patch.urlIv = body.urlIv ? Buffer.from(body.urlIv, "base64") : null;
+      patch.url = null;
     }
 
     // Atomic: snapshot (if content changed) + prune to last 10 + update + audit
@@ -752,6 +926,15 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
           passwordIv: prev.passwordIv,
           notesCiphertext: prev.notesCiphertext,
           notesIv: prev.notesIv,
+          // Phase C ZK metadata-ciphertext snapshot (gap fix): copy the same
+          // name/username/url ciphertext the live item holds so a v2 version can
+          // show/restore its real (encrypted) metadata. NULL for v1/legacy v2.
+          nameCiphertext: prev.nameCiphertext,
+          nameIv: prev.nameIv,
+          usernameCiphertext: prev.usernameCiphertext,
+          usernameIv: prev.usernameIv,
+          urlCiphertext: prev.urlCiphertext,
+          urlIv: prev.urlIv,
           // Snapshot the DEK wrap so this version decrypts self-contained even
           // after the live item's DEK rotates (NULL in ZK mode).
           dekCiphertext: prev.dekCiphertext,
@@ -779,6 +962,14 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
       const [row] = await tx.update(items).set(patch).where(eq(items.id, id)).returning();
       if (!row) throw errors.notFound("Item not found");
 
+      // FR-043: when the client sends searchTerms (v2), REPLACE the item's
+      // blind-index set in the same tx. Omitting the key leaves terms intact
+      // (e.g. a folderId-only PATCH). Only meaningful for v2 vaults; a v1 client
+      // never sends it, so v1 items keep an empty term set.
+      if (body.searchTerms !== undefined) {
+        await replaceSearchTerms(tx, id, decodeSearchTerms(body.searchTerms));
+      }
+
       await tx.insert(auditEvents).values({
         orgId: access.vault.orgId,
         actorUserId: user.id,
@@ -787,7 +978,7 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "item",
         targetId: id,
         targetName: row.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: {
@@ -802,7 +993,8 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
     });
 
     const creator = await creatorFor(updated);
-    return c.json({ item: toSummary(updated, creator) });
+    const orgRotationDefault = await orgRotationDefaultFor(access.vault.orgId);
+    return c.json({ item: toSummary(updated, creator, orgRotationDefault) });
   })
 
   .delete("/:id", paramValidator(uuidParam), async (c) => {
@@ -832,7 +1024,7 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "item",
         targetId: id,
         targetName: access.item.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
       });
@@ -916,7 +1108,7 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
                 targetType: "item",
                 targetId: id,
                 targetName: access.item.name,
-                ipHash: hashIp(getClientIp(c)),
+                ...clientIpAuditFields(c),
                 userAgent: c.req.header("user-agent") ?? null,
                 success: true,
                 metadata: { bulk: true, granteeUserId, granteeEmail: grantee?.email ?? null, role: shareRole },
@@ -958,7 +1150,7 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
                 targetType: "item",
                 targetId: id,
                 targetName: access.item.name,
-                ipHash: hashIp(getClientIp(c)),
+                ...clientIpAuditFields(c),
                 userAgent: c.req.header("user-agent") ?? null,
                 success: true,
                 metadata: { bulk: true, granteeTeamId, granteeTeamName: team.name, role: shareRole },
@@ -1007,7 +1199,7 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
               targetType: "item",
               targetId: id,
               targetName: access.item.name,
-              ipHash: hashIp(getClientIp(c)),
+              ...clientIpAuditFields(c),
               userAgent: c.req.header("user-agent") ?? null,
               success: true,
               metadata: { bulk: true },
@@ -1034,7 +1226,7 @@ export const itemRoutes = new Hono<{ Variables: AuthVariables }>()
               targetType: "item",
               targetId: id,
               targetName: access.item.name,
-              ipHash: hashIp(getClientIp(c)),
+              ...clientIpAuditFields(c),
               userAgent: c.req.header("user-agent") ?? null,
               success: true,
               metadata: { bulk: true, fields: ["folderId"] },
@@ -1120,15 +1312,23 @@ export const vaultItemRoutes = new Hono<{
       return viewer.vaultRole;
     };
 
+    // US-060: resolve the org rotation default ONCE for the whole list so the
+    // per-row rotation status compute stays N+1-free.
+    const orgRotationDefault = await orgRotationDefaultFor(viewer.vault.orgId);
+
     const out: ItemSummary[] = [];
     for (const r of rows) {
       const role = effectiveFor(r.item);
       // Sub-grant-only caller with no grant on this specific item → skip it.
       if (!role) continue;
-      const summary = toSummary(r.item, {
-        id: r.creatorId ?? "",
-        displayName: r.displayName ?? r.name ?? r.email ?? "unknown",
-      });
+      const summary = toSummary(
+        r.item,
+        {
+          id: r.creatorId ?? "",
+          displayName: r.displayName ?? r.name ?? r.email ?? "unknown",
+        },
+        orgRotationDefault,
+      );
       summary.effectiveRole = role;
       out.push(summary);
     }
@@ -1172,18 +1372,48 @@ export const vaultItemRoutes = new Hono<{
         throw errors.forbidden("Read-only access to this vault");
       }
 
+      // ZK enforcement (DESIGN §5 / FR-043 / AC-017.2): a v2 (zero-knowledge)
+      // vault must NEVER receive plaintext metadata. The client is REQUIRED to
+      // encrypt the name → nameCiphertext before it leaves the browser. Reject
+      // any create on a v2 vault that omits nameCiphertext so a misbehaving /
+      // malicious client cannot write a plaintext `name` into the column and
+      // silently defeat the zero-knowledge guarantee server-side.
+      if (viewer.vault.encryptionVersion === 2 && !body.nameCiphertext) {
+        throw errors.validation("Validation failed", {
+          nameCiphertext: ["required for v2 (zero-knowledge) vault"],
+        });
+      }
+
       let created: Item;
 
-      if (viewer.vault.encryptionVersion === 2) {
-        // Phase C: ZK mode
-        const [row] = await db
+      // US-060: per-item rotation override at create (clamped; 0/neg → NULL =
+      // inherit org default).
+      const rotationPolicyDays = clampRotationDays(body.rotationPolicyDays);
+
+      // Zero-knowledge create. When the client encrypts metadata (FR-043) it
+      // sends nameCiphertext etc. and the server NEVER stores plaintext name/
+      // username/url — `name` is forced to "" (NOT NULL placeholder) and
+      // username/url to NULL. If the client did NOT send nameCiphertext
+      // (transition / older client), fall back to the plaintext fields so the
+      // legacy v2 shape still works. Blind-index terms are written in the same
+      // tx so the item + its index commit atomically.
+      const zkMeta = body.nameCiphertext !== undefined;
+      const searchTerms = decodeSearchTerms(body.searchTerms);
+      created = await db.transaction(async (tx) => {
+        const [row] = await tx
           .insert(items)
           .values({
             vaultId: id,
             type: body.type,
-            name: body.name,
-            username: body.username ?? null,
-            url: body.url ?? null,
+            name: zkMeta ? "" : body.name,
+            username: zkMeta ? null : (body.username ?? null),
+            url: zkMeta ? null : (body.url ?? null),
+            nameCiphertext: body.nameCiphertext ? Buffer.from(body.nameCiphertext, "base64") : null,
+            nameIv: body.nameIv ? Buffer.from(body.nameIv, "base64") : null,
+            usernameCiphertext: body.usernameCiphertext ? Buffer.from(body.usernameCiphertext, "base64") : null,
+            usernameIv: body.usernameIv ? Buffer.from(body.usernameIv, "base64") : null,
+            urlCiphertext: body.urlCiphertext ? Buffer.from(body.urlCiphertext, "base64") : null,
+            urlIv: body.urlIv ? Buffer.from(body.urlIv, "base64") : null,
             folderId: body.folderId ?? null,
             passwordCiphertext: body.passwordCiphertext ? Buffer.from(body.passwordCiphertext, "base64") : null,
             passwordIv: body.passwordIv ? Buffer.from(body.passwordIv, "base64") : null,
@@ -1193,54 +1423,13 @@ export const vaultItemRoutes = new Hono<{
             dekIv: null,
             // AC-015.3: stamp the initial rotation time when created with a password.
             passwordChangedAt: body.passwordCiphertext ? new Date() : null,
+            rotationPolicyDays,
             createdBy: user.id,
           })
           .returning();
-        created = row!;
-      } else {
-        // Phase A: Server-side mode
-        const { dek, wrapped } = generateWrappedDek();
-        try {
-          let pwCipher: Buffer | null = null;
-          let pwIv: Buffer | null = null;
-          let notesCipher: Buffer | null = null;
-          let notesIv: Buffer | null = null;
-          if (body.password) {
-            const e = encryptField(dek, body.password);
-            pwCipher = e.ciphertext;
-            pwIv = e.iv;
-          }
-          if (body.notes) {
-            const e = encryptField(dek, body.notes);
-            notesCipher = e.ciphertext;
-            notesIv = e.iv;
-          }
-
-          const [row] = await db
-            .insert(items)
-            .values({
-              vaultId: id,
-              type: body.type,
-              name: body.name,
-              username: body.username ?? null,
-              url: body.url ?? null,
-              folderId: body.folderId ?? null,
-              passwordCiphertext: pwCipher,
-              passwordIv: pwIv,
-              notesCiphertext: notesCipher,
-              notesIv: notesIv,
-              dekCiphertext: wrapped.dekCiphertext,
-              dekIv: wrapped.dekIv,
-              // AC-015.3: stamp the initial rotation time when created with a password.
-              passwordChangedAt: body.password ? new Date() : null,
-              createdBy: user.id,
-            })
-            .returning();
-          created = row!;
-        } finally {
-          zeroize(dek);
-        }
-      }
+        await replaceSearchTerms(tx, row!.id, searchTerms);
+        return row!;
+      });
 
       await db.insert(auditEvents).values({
         orgId: viewer.vault.orgId,
@@ -1250,7 +1439,7 @@ export const vaultItemRoutes = new Hono<{
         targetType: "item",
         targetId: created.id,
         targetName: created.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { encryptionVersion: viewer.vault.encryptionVersion },
@@ -1260,7 +1449,8 @@ export const vaultItemRoutes = new Hono<{
         id: user.id,
         displayName: user.displayName ?? user.name ?? user.email,
       };
-      return c.json({ item: toSummary(created, creator) }, 201);
+      const orgRotationDefault = await orgRotationDefaultFor(viewer.vault.orgId);
+      return c.json({ item: toSummary(created, creator, orgRotationDefault) }, 201);
     },
   );
 

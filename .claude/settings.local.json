@@ -29,7 +29,11 @@
       "Bash(docker exec *)",
       "Read(//private/tmp/**)",
       "Bash(rm -f /tmp/woxa-cookie.txt)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(grep -n \"^#\\\\{1,3\\\\} \" DESIGN.md)",
+      "Bash(node -e \"const p=require\\('./woxa-vault-api/package.json'\\); console.log\\(JSON.stringify\\(p.scripts,null,2\\)\\)\")",
+      "Bash(cd /Users/woxa/Projects/Woxa-vault/.claude/agent-memory && mkdir -p woxa-vault-uiux-reviewer woxa-vault-red-team woxa-vault-blue-team && ls)",
+      "Bash(xargs -n1 basename)"
     ]
   }
 }

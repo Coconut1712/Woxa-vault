@@ -42,6 +42,7 @@ import { AttachmentsSection } from "@/components/vault/attachments-section";
 import { ItemActivitySection } from "@/components/vault/item-activity-section";
 import { ItemVersionsSection } from "@/components/vault/item-versions-section";
 import { IconTile } from "@/components/icon";
+import { RotationBadge } from "@/components/vault/rotation-badge";
 import {
   ApiErrorState,
   ApiLoadingState,
@@ -52,6 +53,7 @@ import {
   getItemPassword,
   getDisplayItemMembers,
   toggleFavorite,
+  VaultLockedError,
   type DisplayItemFull,
   type VaultMember,
 } from "@/lib/items-overlay";
@@ -232,18 +234,32 @@ export default function ItemDetailPage({
   const handleToggleFavorite = useCallback(async () => {
     if (!item) return;
     try {
+      // v2 (ZK) vault: persisting a favorite re-encrypts the notes meta blob, so
+      // pass the vault key (cached on this page once unlocked). A locked vault →
+      // VaultLockedError, which we surface as an "unlock first" toast.
+      const key =
+        vault?.encryptionVersion === 2
+          ? vaultKey ?? (await getVaultKey(item.vaultId))
+          : null;
       // Guests may favorite, but read-only: persist client-side only (no
       // PATCH /items, which the backend blocks for them).
       const next = await toggleFavorite(item.id, {
         persist: canWriteVaultData(me?.role ?? null),
+        vaultKey: key,
       });
       setItem(next);
     } catch (err) {
+      if (err instanceof VaultLockedError) {
+        toast.error(tr("item.favorite_locked"), {
+          description: tr("item.favorite_locked_desc"),
+        });
+        return;
+      }
       const description =
         err instanceof ApiError ? err.message : tr("api.error.generic");
       toast.error(tr("api.error.save_failed"), { description });
     }
-  }, [item, tr, me]);
+  }, [item, tr, me, vault, vaultKey, getVaultKey]);
 
   if (loading) {
     return (
@@ -457,6 +473,10 @@ export default function ItemDetailPage({
                       {tagText}
                     </Badge>
                   ))}
+                <RotationBadge
+                  status={item.rotationStatus}
+                  dueAt={item.rotationDueAt}
+                />
                 <span className="text-xs text-muted-foreground ml-1">
                   ·{" "}
                   {tr("item.updated_at", {
@@ -742,11 +762,7 @@ export default function ItemDetailPage({
                 <ul className="space-y-2.5 text-sm">
                   <SecurityRow
                     label={tr("item.security.encryption")}
-                    value={
-                      vault && vault.encryptionVersion >= 2
-                        ? tr("item.encryption.zk")
-                        : tr("item.encryption.envelope")
-                    }
+                    value={tr("item.encryption.zk")}
                   />
                   <SecurityRow
                     label={tr("item.security.strength")}

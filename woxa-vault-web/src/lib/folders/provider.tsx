@@ -39,6 +39,7 @@ import {
   listFolders as apiList,
   updateFolder as apiUpdate,
 } from "@/lib/api/folders";
+import { reorderFolders as apiReorder } from "@/lib/api/vaults";
 import type {
   Folder,
   FolderCreateInput,
@@ -63,6 +64,12 @@ interface FoldersContextValue {
   ) => Promise<Folder>;
   /** Delete folder + refresh that vault's list. Throws on API error. */
   remove: (vaultId: string, id: string) => Promise<void>;
+  /**
+   * Persist a new folder display order (US-011.4). Reorders the local list
+   * optimistically, calls the API, and reverts on error. `order` is the full
+   * list of folder ids in their desired order.
+   */
+  reorder: (vaultId: string, order: string[]) => Promise<void>;
 }
 
 const FoldersContext = createContext<FoldersContextValue | null>(null);
@@ -194,9 +201,46 @@ export function FoldersProvider({ children }: { children: React.ReactNode }) {
     [refresh],
   );
 
+  const reorder = useCallback(
+    async (vaultId: string, order: string[]) => {
+      if (!isUuid(vaultId)) return;
+      let previous: Folder[] | undefined;
+      setByVaultMap((prev) => {
+        const current = prev[vaultId];
+        if (!current) return prev;
+        previous = current;
+        const byId = new Map(current.map((folder) => [folder.id, folder]));
+        const next: Folder[] = [];
+        for (const id of order) {
+          const folder = byId.get(id);
+          if (folder) {
+            next.push(folder);
+            byId.delete(id);
+          }
+        }
+        // Keep any folders not named in `order` (defensive) appended in their
+        // original relative order so nothing silently disappears.
+        for (const folder of current) {
+          if (byId.has(folder.id)) next.push(folder);
+        }
+        return { ...prev, [vaultId]: next };
+      });
+      try {
+        await apiReorder(vaultId, order);
+      } catch (err) {
+        if (previous) {
+          const reverted = previous;
+          setByVaultMap((prev) => ({ ...prev, [vaultId]: reverted }));
+        }
+        throw err;
+      }
+    },
+    [],
+  );
+
   const value = useMemo<FoldersContextValue>(
-    () => ({ byVault, isLoading, refresh, create, update, remove }),
-    [byVault, isLoading, refresh, create, update, remove],
+    () => ({ byVault, isLoading, refresh, create, update, remove, reorder }),
+    [byVault, isLoading, refresh, create, update, remove, reorder],
   );
 
   return (

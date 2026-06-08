@@ -48,6 +48,13 @@ export function generateSessionToken(): string {
 export async function createSession(
   userId: string,
   metadata: SessionMetadata = {},
+  // Test-only hook (HIGH finding): a freshly minted session starts LOCKED.
+  // Production callers (login / SSO callback) must NOT pass this — the vault
+  // unlock is stamped exclusively by POST /me/verify-password after the master
+  // password is re-proved (DESIGN.md §15). Defaulting to false means a login
+  // alone never unlocks the vault, so a session-thief who replays a stolen
+  // cookie cannot reach reveal/download endpoints without the master password.
+  startUnlocked = false,
 ): Promise<{ token: string; session: Session }> {
   const token = generateSessionToken();
   const sessionId = hashToken(token);
@@ -62,11 +69,12 @@ export async function createSession(
       userId,
       expiresAt,
       absoluteExpiresAt,
-      // WARN-I: a fresh session = the user has just proved identity (password
-      // login or SSO callback). Initial state is unlocked so they don't get
-      // bounced straight into a lock prompt. The 15-minute idle window then
-      // takes over.
-      vaultUnlockedAt: new Date(now),
+      // HIGH finding (server-side vault lock): a fresh session is LOCKED by
+      // default. Proving identity (password login / SSO) is NOT the same as
+      // proving the master password — only POST /me/verify-password stamps
+      // `vault_unlocked_at`. Auto-stamping here meant any login (or a stolen
+      // session) implicitly unlocked the vault, bypassing the AC-055.8 gate.
+      vaultUnlockedAt: startUnlocked ? new Date(now) : null,
       ipHash: metadata.ipHash,
       userAgent: metadata.userAgent,
       deviceName: metadata.deviceName,

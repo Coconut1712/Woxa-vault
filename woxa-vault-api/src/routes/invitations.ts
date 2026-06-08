@@ -5,11 +5,12 @@ import { createHash } from "node:crypto";
 import { db } from "@/db/client";
 import { auditEvents, invitations, organizations, orgMembers, users } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { hashIp, maskIp, clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { logger } from "@/lib/logger";
 import type { OrgRole } from "@/lib/orgAccess";
 import { hashPassword } from "@/lib/password";
+import { generateKdfSalt } from "@/lib/kdfSalt";
 import { rateLimit } from "@/lib/rateLimit";
 import { buildSessionCookie, createSession } from "@/lib/session";
 import { jsonValidator, paramValidator } from "@/lib/validator";
@@ -247,7 +248,7 @@ export const invitationRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "invitation",
           targetId: row.id,
           targetName: row.email,
-          ipHash: hashIp(getClientIp(c)),
+          ...clientIpAuditFields(c),
           userAgent: c.req.header("user-agent") ?? null,
           success: true,
           metadata: { role: row.role, alreadyMember: true, existingRole: existing[0]!.role },
@@ -286,7 +287,7 @@ export const invitationRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "invitation",
         targetId: row.id,
         targetName: row.email,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { role: row.role },
@@ -427,6 +428,7 @@ export const invitationRoutes = new Hono<{ Variables: AuthVariables }>()
       const loginPasswordHash = await hashPassword(body.password);
       const now = new Date();
       const ipHash = hashIp(ip);
+      const ipMasked = maskIp(ip);
       const userAgent = c.req.header("user-agent") ?? null;
       const displayName = body.displayName?.trim() || null;
 
@@ -447,6 +449,9 @@ export const invitationRoutes = new Hono<{ Variables: AuthVariables }>()
             // requiresPasswordSetup=true → frontend routes to /setup-password.
             loginPasswordHash,
             passwordHash: null,
+            // Per-user KDF salt (Phase C fix #2) — random, server-stored salt
+            // for client-side master-key derivation.
+            kdfSalt: generateKdfSalt(),
             // Invite token proves mailbox ownership → email is verified.
             emailVerifiedAt: now,
             status: "active",
@@ -483,6 +488,7 @@ export const invitationRoutes = new Hono<{ Variables: AuthVariables }>()
           targetId: row.id,
           targetName: row.email,
           ipHash,
+          ipMasked,
           userAgent,
           success: true,
           metadata: { role: row.role, viaSignup: true },

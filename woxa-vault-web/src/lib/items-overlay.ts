@@ -58,7 +58,20 @@ import {
   decryptData,
   fromBase64,
   toBase64,
+  deriveSearchKey,
+  computeSearchTerms,
+  computeQueryTerms,
 } from "@/lib/crypto-client";
+import { searchBlindItems, type SearchResult } from "@/lib/api/search";
+
+/**
+ * Placeholder shown for a v2 (ZK) item's name when the vault is locked and we
+ * therefore have no vault key to decrypt `nameCiphertext`. Rendering this (vs.
+ * a blank row) keeps locked lists legible; the real name appears once the user
+ * unlocks and the page refetches. The lock emoji is intentional UI affordance,
+ * not decorative — it signals "encrypted, unlock to read".
+ */
+export const ZK_LOCKED_PLACEHOLDER = "🔒";
 
 /* ===================================================================
    Display shapes — these are what UI components actually want to read.
@@ -149,9 +162,21 @@ function emptyMeta(displayKind: DisplayKind): ItemMeta {
 export async function listDisplayItems(
   vaultId: string,
   signal?: AbortSignal,
+  vaultKey?: Uint8Array,
 ): Promise<DisplayItemSummary[]> {
   const items = await apiList(vaultId, signal);
-  return items.map(decorateSummary);
+  // Fast path: a row WITHOUT metadata ciphertext (e.g. legacy migration data)
+  // passes through its plaintext columns — `decryptItemMeta` handles that case
+  // per-row, so a mixed list still renders correctly.
+  const hasZk = items.some((it) => it.nameCiphertext);
+  if (!hasZk) return items.map(decorateSummary);
+
+  return Promise.all(
+    items.map(async (it) => {
+      const decoded = await decryptItemMeta(it, vaultKey);
+      return decorateSummary({ ...it, ...decoded });
+    }),
+  );
 }
 
 export async function getDisplayItem(
@@ -173,7 +198,12 @@ export async function getDisplayItem(
   // correct kind/folder/tags immediately on next render.
   setSummaryMeta(item.id, cacheFromMeta(meta));
 
-  return buildDisplay(item, meta, notes);
+  // v2: decrypt the metadata ciphertext (name/username/url) for display. v1
+  // rows pass through plaintext. A locked vault (no key) degrades to the 🔒
+  // placeholder rather than a blank detail view.
+  const decoded = await decryptItemMeta(item, vaultKey);
+
+  return buildDisplay({ ...item, ...decoded }, meta, notes);
 }
 
 /**
@@ -223,6 +253,88 @@ async function decryptZk(
     },
     vaultKey,
   );
+}
+
+/**
+ * Decrypt a v2 (ZK) item's `nameCiphertext`/`nameIv` for display (e.g. the
+ * dashboard rotation widget, which only has the name blob — not a full item).
+ * Returns null on a missing/undecryptable blob so callers can fall back to the
+ * 🔒 placeholder. Public thin wrapper over the internal `decryptZk`.
+ */
+export async function decryptZkName(
+  ciphertext: string | null | undefined,
+  iv: string | null | undefined,
+  vaultKey: Uint8Array,
+): Promise<string | null> {
+  try {
+    return await decryptZk(ciphertext, iv, vaultKey);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Encrypt one plaintext value with the vault key into the wire `{ ciphertext,
+ * iv }` base64 pair (GCM tag packed as the trailing 16 bytes of the blob — the
+ * exact layout `decryptZk` expects).
+ */
+async function encryptZk(
+  plaintext: string,
+  vaultKey: Uint8Array,
+): Promise<{ ciphertext: string; iv: string }> {
+  const enc = await encryptData(plaintext, vaultKey);
+  const combined = new Uint8Array(enc.ciphertext.length + enc.authTag.length);
+  combined.set(enc.ciphertext);
+  combined.set(enc.authTag, enc.ciphertext.length);
+  return { ciphertext: toBase64(combined), iv: toBase64(enc.iv) };
+}
+
+/**
+ * Decrypt the ZK metadata ciphertext (name/username/url) on a summary/full row
+ * into display strings. v1 rows (no `nameCiphertext`) pass through their
+ * plaintext columns unchanged. v2 rows WITHOUT a key (locked vault) get the
+ * 🔒 placeholder for the name and null username/url, so a locked list stays
+ * legible instead of rendering blank rows. The backend blanks the plaintext
+ * `name`/`username`/`url` for a v2 item, so the ciphertext is the only source.
+ */
+async function decryptItemMeta(
+  row: {
+    name: string;
+    username: string | null;
+    url: string | null;
+    nameCiphertext?: string | null;
+    nameIv?: string | null;
+    usernameCiphertext?: string | null;
+    usernameIv?: string | null;
+    urlCiphertext?: string | null;
+    urlIv?: string | null;
+  },
+  vaultKey?: Uint8Array,
+): Promise<{ name: string; username: string | null; url: string | null }> {
+  // v1 / plaintext item: no metadata ciphertext present.
+  if (!row.nameCiphertext) {
+    return { name: row.name, username: row.username, url: row.url };
+  }
+  // v2 item but the vault is locked (no key): show a placeholder, don't crash.
+  if (!vaultKey) {
+    return { name: ZK_LOCKED_PLACEHOLDER, username: null, url: null };
+  }
+  try {
+    const [name, username, url] = await Promise.all([
+      decryptZk(row.nameCiphertext, row.nameIv, vaultKey),
+      decryptZk(row.usernameCiphertext, row.usernameIv, vaultKey),
+      decryptZk(row.urlCiphertext, row.urlIv, vaultKey),
+    ]);
+    return {
+      name: name ?? ZK_LOCKED_PLACEHOLDER,
+      username: username,
+      url: url,
+    };
+  } catch {
+    // A bad key / corrupt blob shouldn't blank the whole list — degrade to the
+    // placeholder for this one row.
+    return { name: ZK_LOCKED_PLACEHOLDER, username: null, url: null };
+  }
 }
 
 /** Reveal-ready version content after any ZK ciphertext has been decrypted. */
@@ -276,6 +388,12 @@ export async function getDisplayItemVersion(
 
   let password = v.password;
   let notesRaw = v.notes ?? "";
+  // Metadata-ciphertext snapshot (Wave-2a): a v2 version blanks name/username/
+  // url and ships them as ciphertext. Legacy v2 snapshots return null here →
+  // `decryptItemMeta` falls back to the plaintext fields.
+  let name = v.name;
+  let username = v.username;
+  let url = v.url;
   if (vaultKey) {
     if (v.passwordCiphertext) {
       password = await decryptZk(v.passwordCiphertext, v.passwordIv, vaultKey);
@@ -283,6 +401,10 @@ export async function getDisplayItemVersion(
     if (v.notesCiphertext) {
       notesRaw = (await decryptZk(v.notesCiphertext, v.notesIv, vaultKey)) ?? "";
     }
+    const decoded = await decryptItemMeta(v, vaultKey);
+    name = decoded.name;
+    username = decoded.username;
+    url = decoded.url;
   }
 
   const { notes } = decodeMeta(notesRaw, v.type);
@@ -290,9 +412,9 @@ export async function getDisplayItemVersion(
   return {
     version: v.version,
     type: v.type,
-    name: v.name,
-    username: v.username,
-    url: v.url,
+    name,
+    username,
+    url,
     password,
     notesPlain: notes,
     createdAt: v.createdAt,
@@ -350,7 +472,10 @@ export interface CreateInput {
   card?: CardData;
   identity?: IdentityData;
   ssh?: SshData;
-  
+
+  /** US-060 — per-item rotation window in days. null/0/undefined = inherit org default. */
+  rotationPolicyDays?: number | null;
+
   /** Phase C: Zero-Knowledge */
   vaultKey?: Uint8Array;
 }
@@ -378,38 +503,68 @@ export async function createDisplayItem(
   const userNotes = (input.notes ?? "").trim();
   const wireNotes = encodeMeta(meta, userNotes);
 
+  // The searchable username/url depend on the item kind (matches the plaintext
+  // mapping below) so the blind index never tokenizes a field the UI hides.
+  const wireUsername =
+    input.displayKind === "login" || input.displayKind === "api_key"
+      ? (input.username ?? null)
+      : null;
+  const wireUrl = input.displayKind === "login" ? (input.url ?? null) : null;
+
   const payload: ItemCreateInput = {
     type: wireType,
     name: input.name,
-    username:
-      input.displayKind === "login" || input.displayKind === "api_key"
-        ? (input.username ?? null)
-        : null,
-    url: input.displayKind === "login" ? (input.url ?? null) : null,
+    username: wireUsername,
+    url: wireUrl,
     password: null, // Set below
     notes: null,    // Set below
     folderId: input.folderId ?? null,
+    // US-060: per-item rotation window. null/0 = inherit org default.
+    rotationPolicyDays: input.rotationPolicyDays ?? null,
   };
 
   if (input.vaultKey) {
     // Phase C: Client-side encryption
     if (wirePassword) {
-      const enc = await encryptData(wirePassword, input.vaultKey);
-      // Combine ciphertext + tag
-      const combined = new Uint8Array(enc.ciphertext.length + enc.authTag.length);
-      combined.set(enc.ciphertext);
-      combined.set(enc.authTag, enc.ciphertext.length);
-      payload.passwordCiphertext = toBase64(combined);
-      payload.passwordIv = toBase64(enc.iv);
+      const enc = await encryptZk(wirePassword, input.vaultKey);
+      payload.passwordCiphertext = enc.ciphertext;
+      payload.passwordIv = enc.iv;
     }
     if (wireNotes) {
-      const enc = await encryptData(wireNotes, input.vaultKey);
-      const combined = new Uint8Array(enc.ciphertext.length + enc.authTag.length);
-      combined.set(enc.ciphertext);
-      combined.set(enc.authTag, enc.ciphertext.length);
-      payload.notesCiphertext = toBase64(combined);
-      payload.notesIv = toBase64(enc.iv);
+      const enc = await encryptZk(wireNotes, input.vaultKey);
+      payload.notesCiphertext = enc.ciphertext;
+      payload.notesIv = enc.iv;
     }
+
+    // ZK metadata: encrypt name/username/url and blank the plaintext columns
+    // (the backend requires `name: ""` XOR `nameCiphertext`). Then compute the
+    // blind-index terms over the SAME searchable fields + tags.
+    payload.name = "";
+    const nameEnc = await encryptZk(input.name, input.vaultKey);
+    payload.nameCiphertext = nameEnc.ciphertext;
+    payload.nameIv = nameEnc.iv;
+
+    if (wireUsername) {
+      const enc = await encryptZk(wireUsername, input.vaultKey);
+      payload.usernameCiphertext = enc.ciphertext;
+      payload.usernameIv = enc.iv;
+    }
+    payload.username = null;
+
+    if (wireUrl) {
+      const enc = await encryptZk(wireUrl, input.vaultKey);
+      payload.urlCiphertext = enc.ciphertext;
+      payload.urlIv = enc.iv;
+    }
+    payload.url = null;
+
+    const searchKey = await deriveSearchKey(input.vaultKey, input.vaultId);
+    payload.searchTerms = await computeSearchTerms(searchKey, {
+      name: input.name,
+      username: wireUsername,
+      url: wireUrl,
+      tags: meta.tags,
+    });
   } else {
     // Phase A: Server-side mode
     payload.password = wirePassword;
@@ -418,6 +573,17 @@ export async function createDisplayItem(
 
   const created = await apiCreate(input.vaultId, payload);
   setSummaryMeta(created.id, cacheFromMeta(meta));
+  // The created summary comes back with name="" / ciphertext for a v2 item;
+  // overlay the plaintext we just sent so the caller's optimistic row (e.g. the
+  // success toast) shows the real name instead of "".
+  if (input.vaultKey) {
+    return decorateSummary({
+      ...created,
+      name: input.name,
+      username: wireUsername,
+      url: wireUrl,
+    });
+  }
   return decorateSummary(created);
 }
 
@@ -450,12 +616,24 @@ export async function updateDisplayItem(
     password: string;
     url: string;
     meta: ItemMeta;
+    /** US-060 — per-item rotation window in days. null = inherit org default. */
+    rotationPolicyDays?: number | null;
   },
   vaultKey?: Uint8Array,
 ): Promise<void> {
   const patch: ItemUpdateInput = {};
 
   if (next.name.trim() !== current.name) patch.name = next.name.trim();
+
+  // US-060 — rotation policy is metadata-only (does not reset passwordChangedAt
+  // or snapshot a version). Send only when it actually changed; `null` clears
+  // the override back to the org default.
+  if (next.rotationPolicyDays !== undefined) {
+    const nextRotation = next.rotationPolicyDays ?? null;
+    if (nextRotation !== (current.rotationPolicyDays ?? null)) {
+      patch.rotationPolicyDays = nextRotation;
+    }
+  }
 
   // Item type-change (FR-030). The backend now persists all six types verbatim
   // and accepts `type` on PATCH. We send it ONLY when the kind actually changed
@@ -535,21 +713,74 @@ export async function updateDisplayItem(
         patch.passwordCiphertext = "";
         patch.passwordIv = "";
       } else {
-        const enc = await encryptData(wirePassword, vaultKey);
-        const combined = new Uint8Array(enc.ciphertext.length + enc.authTag.length);
-        combined.set(enc.ciphertext);
-        combined.set(enc.authTag, enc.ciphertext.length);
-        patch.passwordCiphertext = toBase64(combined);
-        patch.passwordIv = toBase64(enc.iv);
+        const enc = await encryptZk(wirePassword, vaultKey);
+        patch.passwordCiphertext = enc.ciphertext;
+        patch.passwordIv = enc.iv;
       }
     }
     // Always send notes in ZK mode (since meta is in it)
-    const enc = await encryptData(wireNotes, vaultKey);
-    const combined = new Uint8Array(enc.ciphertext.length + enc.authTag.length);
-    combined.set(enc.ciphertext);
-    combined.set(enc.authTag, enc.ciphertext.length);
-    patch.notesCiphertext = toBase64(combined);
-    patch.notesIv = toBase64(enc.iv);
+    const notesEnc = await encryptZk(wireNotes, vaultKey);
+    patch.notesCiphertext = notesEnc.ciphertext;
+    patch.notesIv = notesEnc.iv;
+
+    // ZK metadata (name/username/url): the plaintext diff above wrote `patch.
+    // name`/`patch.username`/`patch.url`. In ZK mode those plaintext columns
+    // are blank server-side — convert each changed value to its ciphertext form
+    // and scrub the plaintext. `patch.x === undefined` means "unchanged" → leave
+    // the existing ciphertext untouched (omit the key).
+    const nameChanged = patch.name !== undefined;
+    const usernameChanged = patch.username !== undefined;
+    const urlChanged = patch.url !== undefined;
+
+    if (nameChanged) {
+      // Sending nameCiphertext re-encrypts AND blanks the plaintext name to "".
+      patch.name = "";
+      const enc = await encryptZk(next.name.trim(), vaultKey);
+      patch.nameCiphertext = enc.ciphertext;
+      patch.nameIv = enc.iv;
+    }
+    if (usernameChanged) {
+      const value = patch.username; // string to set, null to clear
+      patch.username = null;
+      if (value) {
+        const enc = await encryptZk(value, vaultKey);
+        patch.usernameCiphertext = enc.ciphertext;
+        patch.usernameIv = enc.iv;
+      } else {
+        patch.usernameCiphertext = null;
+        patch.usernameIv = null;
+      }
+    }
+    if (urlChanged) {
+      const value = patch.url;
+      patch.url = null;
+      if (value) {
+        const enc = await encryptZk(value, vaultKey);
+        patch.urlCiphertext = enc.ciphertext;
+        patch.urlIv = enc.iv;
+      } else {
+        patch.urlCiphertext = null;
+        patch.urlIv = null;
+      }
+    }
+
+    // Blind index: REPLACE the term set only when a searchable field actually
+    // changed (name/username/url/tags). Omitting `searchTerms` leaves the index
+    // untouched, so a notes-only or folder-only edit doesn't re-index. Tokens
+    // are computed over the SAME relevance-filtered values the columns hold.
+    const tagsChanged =
+      JSON.stringify(next.meta.tags) !== JSON.stringify(current.displayTags);
+    if (nameChanged || usernameChanged || urlChanged || tagsChanged) {
+      const nextUsername = usernameRelevant ? next.username.trim() || null : null;
+      const nextUrl = urlRelevant ? next.url.trim() || null : null;
+      const searchKey = await deriveSearchKey(vaultKey, current.vaultId);
+      patch.searchTerms = await computeSearchTerms(searchKey, {
+        name: next.name.trim(),
+        username: nextUsername,
+        url: nextUrl,
+        tags: next.meta.tags,
+      });
+    }
   } else {
     // Phase A: Server-side mode
     if (wirePassword !== undefined) patch.password = wirePassword;
@@ -577,23 +808,66 @@ export async function updateDisplayItem(
  * (per-browser) meta cache. That keeps a guest's favorites personal to their
  * browser without touching the shared item, which is also the more correct
  * semantic (favorites should be per-user, not global).
+ *
+ * v2 (ZK) items carry the meta INSIDE `notesCiphertext`. To persist a favorite
+ * we must decrypt the notes blob with the vault key, flip the flag, and
+ * re-encrypt — so the caller passes `vaultKey`. We omit `searchTerms` from the
+ * PATCH because favorite is not a searchable field (the blind index is
+ * untouched). If the vault is locked (no key) we can't persist: we throw a
+ * `VaultLockedError` so the caller can prompt the user to unlock instead of
+ * silently flipping a browser-local-only state.
  */
+export class VaultLockedError extends Error {
+  constructor() {
+    super("vault_locked");
+    this.name = "VaultLockedError";
+  }
+}
+
 export async function toggleFavorite(
   id: string,
-  opts?: { persist?: boolean },
+  opts?: { persist?: boolean; vaultKey?: Uint8Array | null },
 ): Promise<DisplayItemFull> {
   const persist = opts?.persist ?? true;
   const item = await apiGet(id);
-  const { meta, notes } = decodeMeta(item.notes, item.type);
+  const isZk = Boolean(item.notesCiphertext);
+
+  // For a v2 item the notes blob is ciphertext — decrypt it with the vault key
+  // so we read the CURRENT meta (favorite lives in it). v1 items expose the
+  // blob in plaintext `notes`.
+  let notesRaw = item.notes ?? "";
+  if (isZk && opts?.vaultKey && item.notesCiphertext) {
+    // A present notes blob MUST decrypt: decoding "" then re-encoding would wipe
+    // the meta header (favorite/tags/customFields) AND the user's notes. If the
+    // key is wrong/stale (decrypt → null) we throw so the caller can prompt for
+    // a re-unlock instead of silently destroying the blob.
+    const decrypted = await decryptZk(item.notesCiphertext, item.notesIv, opts.vaultKey);
+    if (decrypted === null) throw new VaultLockedError();
+    notesRaw = decrypted;
+  }
+  const { meta, notes } = decodeMeta(notesRaw, item.type);
+
   // Prefer the local cache as the source of truth for the CURRENT state so a
   // guest's browser-local toggles flip correctly across calls (the notes-blob
   // `meta.favorite` is the global value they can't write to).
   const cached = getSummaryMeta(id);
   const currentFavorite = cached?.favorite ?? meta.favorite;
   const nextMeta: ItemMeta = { ...meta, favorite: !currentFavorite };
+
   if (persist) {
-    const encoded = encodeMeta(nextMeta, notes);
-    await apiUpdate(id, { notes: encoded });
+    if (isZk) {
+      // ZK persist requires the vault key to re-encrypt the meta blob. A locked
+      // vault (no key) can't persist — surface it so the caller prompts unlock
+      // rather than silently keeping a browser-only toggle.
+      if (!opts?.vaultKey) throw new VaultLockedError();
+      const encoded = encodeMeta(nextMeta, notes);
+      const enc = await encryptZk(encoded, opts.vaultKey);
+      // Omit searchTerms — favorite is not searchable, so the blind index stays.
+      await apiUpdate(id, { notesCiphertext: enc.ciphertext, notesIv: enc.iv });
+    } else {
+      const encoded = encodeMeta(nextMeta, notes);
+      await apiUpdate(id, { notes: encoded });
+    }
   }
   setSummaryMeta(id, cacheFromMeta(nextMeta));
   return buildDisplay(item, nextMeta, notes);
@@ -602,6 +876,83 @@ export async function toggleFavorite(
 export async function deleteDisplayItem(id: string): Promise<void> {
   await apiDelete(id);
   deleteSummaryMeta(id);
+}
+
+/* ===================================================================
+   Search (v2 ZK blind index) — FR-043 / AC-017.2 / NFR-032
+   =================================================================== */
+
+/** A search vault descriptor the orchestrator needs to route a query. */
+export interface SearchVaultRef {
+  id: string;
+}
+
+export interface SearchOutcome {
+  results: SearchResult[];
+  /**
+   * True when at least one v2 (ZK) vault was skipped because it was locked
+   * (no key available). The UI surfaces a "unlock to search encrypted vaults"
+   * hint rather than silently omitting those items.
+   */
+  hadLockedZkVault: boolean;
+}
+
+/**
+ * Run a global search across every zero-knowledge vault via the blind-index
+ * path and merge client-side (FR-043).
+ *
+ * Tokenize the query, then HMAC each token under EACH unlocked vault's per-vault
+ * search key (the same word yields a different digest per vault). Union the
+ * per-vault tokens into ONE `POST /search/blind`. Decrypt the returned
+ * ciphertext metadata with the matching vault key for display. Locked vaults are
+ * skipped (no key) and flagged via `hadLockedZkVault`.
+ *
+ * The server already RBAC-filters and ranks results; we render them as-is — no
+ * client re-sort, matching the contract's "merge client-side" guidance.
+ */
+export async function searchAllItems(
+  query: string,
+  vaults: SearchVaultRef[],
+  getVaultKey: (vaultId: string) => Promise<Uint8Array | null>,
+  signal?: AbortSignal,
+): Promise<SearchOutcome> {
+  // Derive a key per vault, tokenize the query under each. Track which vaults we
+  // actually got a key for so we can decrypt their rows and report locked ones.
+  const keyByVault = new Map<string, Uint8Array>();
+  let hadLockedZkVault = false;
+  const termSet = new Set<string>();
+
+  await Promise.all(
+    vaults.map(async (v) => {
+      const key = await getVaultKey(v.id);
+      if (!key) {
+        hadLockedZkVault = true;
+        return;
+      }
+      keyByVault.set(v.id, key);
+      const searchKey = await deriveSearchKey(key, v.id);
+      const terms = await computeQueryTerms(searchKey, query);
+      for (const t of terms) termSet.add(t);
+    }),
+  );
+
+  const v2Raw: SearchResult[] =
+    termSet.size > 0
+      ? await searchBlindItems([...termSet], { signal }).catch(() => [])
+      : [];
+
+  // Decrypt rows' metadata with the matching vault key. A row whose vault we
+  // somehow lack a key for (shouldn't happen — we only sent its tokens if we
+  // had the key) degrades to the placeholder rather than blank.
+  const results = await Promise.all(
+    v2Raw.map(async (row) => {
+      const key = keyByVault.get(row.vaultId);
+      const decoded = await decryptItemMeta(row, key);
+      return { ...row, ...decoded };
+    }),
+  );
+
+  return { results, hadLockedZkVault };
 }
 
 /** Wrapper for item member list. */

@@ -1,0 +1,1 @@
+- [clientIp TRUST_PROXY gate](fix_clientip_trust_proxy.md) — all forwarding headers (incl cf/fly) gated behind TRUST_PROXY; fixed rate-limit IP spoof; guarded by clientIp.test.ts

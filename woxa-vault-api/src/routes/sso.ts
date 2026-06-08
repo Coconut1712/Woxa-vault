@@ -7,12 +7,13 @@ import { db } from "@/db/client";
 import { auditEvents, users } from "@/db/schema";
 import { errors } from "@/lib/errors";
 import { getClientIp } from "@/lib/clientIp";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { logger } from "@/lib/logger";
 import { rateLimit } from "@/lib/rateLimit";
 import { buildSessionCookie, createSession } from "@/lib/session";
 import { buildMfaPendingCookie, signMfaToken } from "@/lib/mfa";
 import { ssoDomainAllowed, ssoJitAllowed } from "@/lib/orgPolicy";
+import { generateKdfSalt } from "@/lib/kdfSalt";
 import type { AuthVariables } from "@/middleware/auth";
 
 // ---------------------------------------------------------------------------
@@ -263,7 +264,7 @@ export const ssoRoutes = new Hono<{ Variables: AuthVariables }>()
           await db.insert(auditEvents).values({
             action: "auth.sso.login.failed",
             actorEmail: email,
-            ipHash: hashIp(getClientIp(c)),
+            ...clientIpAuditFields(c),
             userAgent: c.req.header("user-agent") ?? null,
             success: false,
             metadata: {
@@ -288,7 +289,7 @@ export const ssoRoutes = new Hono<{ Variables: AuthVariables }>()
         await db.insert(auditEvents).values({
           action: "auth.sso.login.failed",
           actorEmail: email,
-          ipHash: hashIp(getClientIp(c)),
+          ...clientIpAuditFields(c),
           userAgent: c.req.header("user-agent") ?? null,
           success: false,
           metadata: {
@@ -368,6 +369,9 @@ export const ssoRoutes = new Hono<{ Variables: AuthVariables }>()
             name: profile.name ?? null,
             emailVerifiedAt: new Date(),
             ssoSubject: profile.sub,
+            // Per-user KDF salt (Phase C fix #2) — populate at creation so a
+            // later ZK setup derives against a random, server-stored salt.
+            kdfSalt: generateKdfSalt(),
             status: "active",
             lastLoginAt: new Date(),
           })
@@ -384,7 +388,7 @@ export const ssoRoutes = new Hono<{ Variables: AuthVariables }>()
         await db.insert(auditEvents).values({
           action: "auth.sso.login.failed",
           actorEmail: email,
-          ipHash: hashIp(getClientIp(c)),
+          ...clientIpAuditFields(c),
           userAgent: c.req.header("user-agent") ?? null,
           success: false,
           metadata: { reason: "jit_disabled", emailDomain },
@@ -392,7 +396,7 @@ export const ssoRoutes = new Hono<{ Variables: AuthVariables }>()
         return finish(redirectToWebError("sso_jit_disabled"));
       }
 
-      const ipHash = hashIp(getClientIp(c));
+      const { ipHash, ipMasked } = clientIpAuditFields(c);
 
       // 3.5) app-level 2FA gate (REQUIREMENTS AC-003.5). SSO must clear the
       // SAME second factor as password login — Google proving the first factor
@@ -411,6 +415,7 @@ export const ssoRoutes = new Hono<{ Variables: AuthVariables }>()
           actorEmail: email,
           action: "auth.login.mfa_required",
           ipHash,
+          ipMasked,
           userAgent: c.req.header("user-agent") ?? null,
           success: true,
           metadata: { provider: "google", sub: profile.sub, channel: "sso" },
@@ -444,6 +449,7 @@ export const ssoRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "session",
         targetId: session.id,
         ipHash,
+        ipMasked,
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { provider: "google", sub: profile.sub },

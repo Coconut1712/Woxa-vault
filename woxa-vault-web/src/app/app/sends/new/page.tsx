@@ -34,11 +34,14 @@ import {
 } from "@/components/ui/select";
 import { ApiError } from "@/lib/api/client";
 import { getItem } from "@/lib/api/items";
-import { getItemPassword } from "@/lib/items-overlay";
+import {
+  getDisplayItem,
+  getItemPassword,
+  type DisplayItemFull,
+} from "@/lib/items-overlay";
 import { createSend } from "@/lib/api/sends";
-import type { ItemFull } from "@/lib/api/types";
 import { useT } from "@/lib/i18n/provider";
-import { fullMeta } from "@/lib/item-meta";
+import { useVaultLock } from "@/components/vault-lock/lock-provider";
 import {
   encodeSendPayload,
   type SendField,
@@ -68,15 +71,24 @@ function NewSendPage() {
   const t = useT();
   const params = useSearchParams();
   const itemId = params.get("item");
+  const { getVaultKey } = useVaultLock();
 
-  // Load the item for the field-picker. GET /items/:id is VIEW-only and returns
-  // password:null (view/reveal split), so we additionally reveal the password
-  // via getItemPassword below — both count as accessing the item on the backend.
-  const [source, setSource] = useState<ItemFull | null>(null);
+  // Decrypted item snapshot for the field-picker. `getDisplayItem` decrypts
+  // name/username/url/notes/totp client-side for a v2 (ZK) vault when given the
+  // vault key, and passes plaintext through for v1 — WITHOUT triggering an
+  // item.reveal. GET /items/:id is VIEW-only (password is always null) and the
+  // password field's *availability* is taken from `source.hasPassword`. The
+  // actual password value is revealed lazily at Generate time (one item.reveal
+  // co-occurring with the send creation), never on mount.
+  const [source, setSource] = useState<DisplayItemFull | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
-  // Revealed password value (view/reveal split). null = not yet revealed / no
-  // reveal access / item has no password; the password field is then omitted.
-  const [revealedPassword, setRevealedPassword] = useState<string | null>(null);
+  // True when the source is a v2 (ZK) item but its vault is locked (no key).
+  // The fields cannot be decrypted, so we show an "unlock first" hint instead
+  // of a confusing blank/disabled state.
+  const [vaultLocked, setVaultLocked] = useState(false);
+  // Vault key for the source's vault (v2/ZK only; undefined for v1 plaintext).
+  // Kept so generate() can lazily reveal the password without re-resolving it.
+  const [vaultKey, setVaultKey] = useState<Uint8Array | undefined>(undefined);
   // Which item fields the user has chosen to include in the send.
   const [selectedFields, setSelectedFields] = useState<Set<FieldKey>>(
     () => new Set<FieldKey>(),
@@ -87,35 +99,49 @@ function NewSendPage() {
     void (async () => {
       if (!itemId) {
         setSource(null);
-        setRevealedPassword(null);
+        setVaultKey(undefined);
+        setVaultLocked(false);
         return;
       }
       setSourceLoading(true);
-      setRevealedPassword(null);
+      setVaultKey(undefined);
+      setVaultLocked(false);
       try {
-        const item = await getItem(itemId);
+        // Fetch the raw row first to learn its vault + encryption version, then
+        // resolve the vault key for a v2 (ZK) vault so getDisplayItem can
+        // decrypt the metadata. v1 passes undefined (plaintext passthrough).
+        // The password is NOT revealed here — only at Generate time.
+        const itemRow = await getItem(itemId);
+        if (cancelled) return;
+
+        // ZK (encryptionVersion=2) rows ship name as ciphertext and blank the
+        // plaintext column — the same signal getDisplayItem uses to decide it
+        // must decrypt. v1 rows leave these null and pass plaintext through.
+        const isZk = Boolean(itemRow.nameCiphertext);
+        const key = isZk ? await getVaultKey(itemRow.vaultId) : undefined;
+        if (cancelled) return;
+
+        // ZK vault is locked: we have no key to decrypt the fields. Surface the
+        // unlock hint and stop — the picker stays empty and the button disabled.
+        if (isZk && !key) {
+          setSource(null);
+          setVaultLocked(true);
+          return;
+        }
+
+        // getDisplayItem decrypts name/username/url/notes/totp but does NOT
+        // touch the password (separate reveal endpoint) — so merely opening
+        // this page logs an item.view, never an item.reveal.
+        const item = await getDisplayItem(itemId, undefined, key ?? undefined);
         if (cancelled) return;
         setSource(item);
-        // GET /items/:id returns password:null (view-only). Building a send from
-        // an item genuinely accesses the secret, so reveal it via the dedicated
-        // endpoint (logs item.reveal — correct). A viewer (403) or a locked
-        // vault leaves it unrevealed: the password field is simply omitted from
-        // the picker rather than blocking the rest of the send.
+        setVaultKey(key ?? undefined);
+        // Default-select the password from item metadata (`hasPassword`) without
+        // revealing its value. The plaintext is fetched lazily in generate().
         if (item.hasPassword) {
-          try {
-            const pw = await getItemPassword(itemId);
-            if (!cancelled && pw) {
-              setRevealedPassword(pw);
-              // Default-select the password if the user hasn't picked anything
-              // yet. Done in this async callback (not a separate effect) to
-              // avoid a synchronous setState-in-effect.
-              setSelectedFields((prev) =>
-                prev.size === 0 ? new Set<FieldKey>(["password"]) : prev,
-              );
-            }
-          } catch {
-            if (!cancelled) setRevealedPassword(null);
-          }
+          setSelectedFields((prev) =>
+            prev.size === 0 ? new Set<FieldKey>(["password"]) : prev,
+          );
         }
       } catch (err) {
         if (cancelled) return;
@@ -129,25 +155,25 @@ function NewSendPage() {
     return () => {
       cancelled = true;
     };
-  }, [itemId, t]);
+  }, [itemId, t, getVaultKey]);
 
   const availableFields = useMemo(() => {
     if (!source) return [];
-    // Strip the encrypted-meta header that the item-meta overlay stashes at
-    // the top of the notes ciphertext — recipients must never see it.
-    const { meta, notes: cleanedNotes } = fullMeta(source);
-    const totpSecret = meta.totpSecret;
+    // getDisplayItem already decrypted these (ZK) or passed them through (v1).
+    // notesPlain has the encrypted-meta header stripped — safe to send. The
+    // password entry's `value` is a placeholder: availability comes from
+    // `source.hasPassword`, and the real plaintext is revealed in generate().
     const fields: Array<{
       key: FieldKey;
       label: string;
       value: string;
       kind: SendFieldKind;
     }> = [];
-    if (revealedPassword)
+    if (source.hasPassword)
       fields.push({
         key: "password",
         label: t("send_new.field.password"),
-        value: revealedPassword,
+        value: "",
         kind: "password",
       });
     if (source.username)
@@ -157,11 +183,11 @@ function NewSendPage() {
         value: source.username,
         kind: "username",
       });
-    if (totpSecret)
+    if (source.totpSecret)
       fields.push({
         key: "totp",
         label: t("send_new.field.totp"),
-        value: totpSecret,
+        value: source.totpSecret,
         kind: "totp",
       });
     if (source.url)
@@ -171,15 +197,15 @@ function NewSendPage() {
         value: source.url,
         kind: "url",
       });
-    if (cleanedNotes)
+    if (source.notesPlain)
       fields.push({
         key: "notes",
         label: t("send_new.field.notes"),
-        value: cleanedNotes,
+        value: source.notesPlain,
         kind: "notes",
       });
     return fields;
-  }, [source, revealedPassword, t]);
+  }, [source, t]);
 
   const [email, setEmail] = useState("");
   const [expiresIn, setExpiresIn] = useState("24h");
@@ -189,16 +215,10 @@ function NewSendPage() {
   const [created, setCreated] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // Human-readable preview composed from the selected fields. Also doubles as
-  // the "anything selected?" guard for the Generate button. Derived (not state)
-  // so it always tracks the current selection without a setState-in-effect.
-  const content = useMemo(() => {
-    if (!source || availableFields.length === 0) return "";
-    return availableFields
-      .filter((f) => selectedFields.has(f.key))
-      .map((f) => `${f.label}: ${f.value}`)
-      .join("\n");
-  }, [source, availableFields, selectedFields]);
+  // "Anything selected?" guard for the Generate button. We no longer compose a
+  // value-bearing preview here because the password value isn't fetched until
+  // generate() — availability is enough to enable the button.
+  const hasSelection = selectedFields.size > 0;
 
   const toggleField = (k: FieldKey) => {
     setSelectedFields((prev) => {
@@ -210,9 +230,28 @@ function NewSendPage() {
   };
 
   const generate = useCallback(async () => {
-    if (!content || submitting) return;
+    if (!hasSelection || submitting) return;
     setSubmitting(true);
     try {
+      // Resolve the password value NOW (not on mount) — this is the single
+      // item.reveal for the whole flow, co-occurring with the send creation.
+      // Other fields already carry decrypted values from getDisplayItem.
+      let resolvedPassword: string | null = null;
+      if (source && selectedFields.has("password")) {
+        try {
+          resolvedPassword = await getItemPassword(
+            source.id,
+            undefined,
+            vaultKey,
+          );
+        } catch (err) {
+          const description =
+            err instanceof ApiError ? err.message : t("api.error.generic");
+          toast.error(t("api.error.reveal_failed"), { description });
+          return;
+        }
+      }
+
       const minutes = EXPIRES_TO_MINUTES[expiresIn] ?? 24 * 60;
       // Build the structured payload from the currently-selected fields so the
       // reveal page can render per-field rows. We always encode (even for raw
@@ -221,7 +260,11 @@ function NewSendPage() {
       // fails — older sends keep working too.
       const payloadFields: SendField[] = availableFields
         .filter((f) => selectedFields.has(f.key))
-        .map((f) => ({ label: f.label, value: f.value, kind: f.kind }));
+        .map((f) => ({
+          label: f.label,
+          value: f.key === "password" ? resolvedPassword ?? "" : f.value,
+          kind: f.kind,
+        }));
       const encodedContent = encodeSendPayload({
         v: 1,
         itemTitle: source?.name,
@@ -232,6 +275,9 @@ function NewSendPage() {
         expiresInMinutes: minutes,
         maxViews: Number(maxViews) || 1,
         password: usePassphrase && passphrase ? passphrase : undefined,
+        // Attribute the send to its source item so the create audit lands on
+        // the item ("Created send" in its activity). Omitted for ad-hoc sends.
+        ...(source ? { itemId: source.id } : {}),
       });
       setCreated(result.viewUrl);
     } catch (err) {
@@ -250,8 +296,8 @@ function NewSendPage() {
     }
   }, [
     availableFields,
-    content,
     expiresIn,
+    hasSelection,
     maxViews,
     passphrase,
     selectedFields,
@@ -259,6 +305,7 @@ function NewSendPage() {
     submitting,
     t,
     usePassphrase,
+    vaultKey,
   ]);
 
   const expiresLabel: Record<string, string> = {
@@ -279,7 +326,7 @@ function NewSendPage() {
           <div className="max-w-2xl mx-auto p-8">
             <Card className="p-6">
               <div className="flex items-center gap-3 mb-4">
-                <div className="size-10 rounded-full bg-green-100 text-green-600 flex items-center justify-center">
+                <div className="size-10 rounded-full bg-emerald-500/15 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
                   <CheckCircle2 className="size-5" />
                 </div>
                 <div>
@@ -294,7 +341,7 @@ function NewSendPage() {
                 {t("send_new.secure_url")}
               </Label>
               <div className="flex items-center gap-2 mt-1">
-                <code className="flex-1 px-3 py-2 bg-muted rounded-md text-xs font-mono-secret break-all">
+                <code className="flex-1 px-3 py-2 bg-surface-2 rounded-md text-xs font-mono-secret break-all">
                   {created}
                 </code>
                 <Button
@@ -390,6 +437,20 @@ function NewSendPage() {
                 <span>
                   {t("send_new.sending_from", { name: source.name })}
                 </span>
+              </div>
+            )}
+
+            {vaultLocked && (
+              <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-amber-500/[0.08] dark:bg-amber-500/[0.05] border border-amber-500/30 dark:border-amber-500/20">
+                <Lock className="size-3.5 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-amber-700 dark:text-amber-400">
+                    {t("send_new.vault_locked")}
+                  </p>
+                  <p className="text-xs text-amber-700/80 dark:text-amber-400/80 mt-0.5">
+                    {t("send_new.vault_locked_desc")}
+                  </p>
+                </div>
               </div>
             )}
 
@@ -529,7 +590,7 @@ function NewSendPage() {
               >
                 {t("common.cancel")}
               </Button>
-              <Button onClick={generate} disabled={!content || submitting}>
+              <Button onClick={generate} disabled={!hasSelection || submitting}>
                 {submitting ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (

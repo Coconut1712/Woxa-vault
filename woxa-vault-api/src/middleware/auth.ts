@@ -9,7 +9,7 @@ import {
 import { db } from "@/db/client";
 import { auditEvents, users, type Session, type User } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { logger } from "@/lib/logger";
 import { resolveActiveOrg, type OrgRole } from "@/lib/orgAccess";
@@ -136,7 +136,7 @@ export const requireVaultUnlocked: MiddlewareHandler<{ Variables: AuthVariables 
           action: "vault.access_denied_locked",
           targetType: "session",
           targetId: session.id,
-          ipHash: hashIp(getClientIp(c)),
+          ...clientIpAuditFields(c),
           userAgent: c.req.header("user-agent") ?? null,
           success: false,
           metadata: {

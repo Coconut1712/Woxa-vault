@@ -286,6 +286,141 @@ export async function sendTwoFactorChangedEmail(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Rotation digest (US-060 / AC-060.4) — weekly summary of overdue/due-soon
+// secrets sent to a workspace owner/admin.
+//
+// SECURITY: carries NO secret material. Item NAMES are plaintext only for v1
+// items; for v2 (ZK) items the server holds name="" so the digest lists them as
+// a generic placeholder ("(encrypted item)") — we never decrypt. The mail leaks
+// only counts + the names the recipient (an org admin/owner) can already see in
+// the dashboard. No password, ciphertext, DEK, or token is ever included.
+// Best-effort: failure must never throw to the caller (the digest job swallows).
+// ---------------------------------------------------------------------------
+export interface RotationDigestItem {
+  name: string; // already display-safe ("(encrypted item)" for v2)
+  vaultName: string;
+  status: "due" | "overdue";
+  dueAt: Date;
+}
+
+export interface RotationDigestInput {
+  to: string;
+  orgName: string;
+  overdueCount: number;
+  dueCount: number;
+  items: RotationDigestItem[]; // capped by the caller
+  dashboardUrl: string;
+}
+
+function renderRotationDigestHtml(input: RotationDigestInput): string {
+  const org = escapeHtml(input.orgName);
+  const url = escapeHtml(input.dashboardUrl);
+  const rows = input.items
+    .map((it) => {
+      const badge = it.status === "overdue" ? "Overdue" : "Due soon";
+      const color = it.status === "overdue" ? "#b91c1c" : "#b45309";
+      return `<tr>
+        <td style="padding:6px 8px;color:#0f172a;">${escapeHtml(it.name)}</td>
+        <td style="padding:6px 8px;color:#64748b;">${escapeHtml(it.vaultName)}</td>
+        <td style="padding:6px 8px;color:${color};font-weight:600;">${badge}</td>
+        <td style="padding:6px 8px;color:#64748b;">${escapeHtml(it.dueAt.toUTCString())}</td>
+      </tr>`;
+    })
+    .join("");
+  return `<!doctype html>
+<html lang="en">
+  <body style="margin:0;padding:0;background:#f5f6fa;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f6fa;padding:32px 0;">
+      <tr><td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;padding:32px;box-shadow:0 1px 3px rgba(15,23,42,0.08);">
+          <tr><td style="font-size:20px;font-weight:600;padding-bottom:8px;">Woxa Vault — rotation reminder</td></tr>
+          <tr><td style="font-size:16px;line-height:24px;color:#334155;padding-top:8px;">
+            <p style="margin:0 0 16px 0;">
+              <strong>${input.overdueCount}</strong> secret(s) are overdue and
+              <strong>${input.dueCount}</strong> are due soon in the
+              <strong>${org}</strong> workspace.
+            </p>
+            <table width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;border-collapse:collapse;margin:0 0 24px 0;">
+              <tr style="text-align:left;color:#94a3b8;border-bottom:1px solid #e2e8f0;">
+                <th style="padding:6px 8px;">Item</th><th style="padding:6px 8px;">Vault</th>
+                <th style="padding:6px 8px;">Status</th><th style="padding:6px 8px;">Due</th>
+              </tr>
+              ${rows}
+            </table>
+            <p style="margin:0 0 24px 0;text-align:center;">
+              <a href="${url}" style="background:#4f46e5;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;display:inline-block;">
+                Review in Woxa Vault
+              </a>
+            </p>
+          </td></tr>
+          <tr><td style="border-top:1px solid #e2e8f0;padding-top:16px;font-size:12px;color:#94a3b8;">
+            This is an automated reminder. We never include secrets in these messages.
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>`;
+}
+
+function renderRotationDigestText(input: RotationDigestInput): string {
+  const lines = input.items.map(
+    (it) =>
+      `- [${it.status === "overdue" ? "OVERDUE" : "DUE SOON"}] ${it.name} (${it.vaultName}) — due ${it.dueAt.toUTCString()}`,
+  );
+  return [
+    "Woxa Vault — rotation reminder",
+    "",
+    `${input.overdueCount} secret(s) are overdue and ${input.dueCount} are due soon in the ${input.orgName} workspace.`,
+    "",
+    ...lines,
+    "",
+    "Review in Woxa Vault:",
+    input.dashboardUrl,
+    "",
+    "This is an automated reminder. We never include secrets in these messages.",
+  ].join("\n");
+}
+
+export async function sendRotationDigestEmail(
+  input: RotationDigestInput,
+): Promise<InviteEmailResult> {
+  const redactedTo = redactEmail(input.to);
+  const baseLog = { to: redactedTo, overdue: input.overdueCount, due: input.dueCount };
+
+  if (!isValidEmail(input.to)) {
+    logger.warn(baseLog, "[mailer] invalid recipient — skipping rotation digest");
+    return { sent: false, errorCode: "invalid_recipient" };
+  }
+
+  const subject = sanitizeForSubject(
+    `${input.overdueCount + input.dueCount} secret(s) need rotation in ${input.orgName}`,
+    78,
+  );
+  const html = renderRotationDigestHtml(input);
+  const text = renderRotationDigestText(input);
+  const client = getClient();
+
+  if (!client) {
+    logger.warn(baseLog, "[mailer] RESEND_API_KEY not configured — rotation digest not sent (dev)");
+    return { sent: false, errorCode: "not_configured" };
+  }
+
+  try {
+    const result = await client.emails.send({ from: env.MAIL_FROM, to: input.to, subject, html, text });
+    if (result.error) {
+      logger.error({ ...baseLog, errorName: result.error.name }, "[mailer] Resend rejected rotation digest");
+      return { sent: false, errorCode: "transport_failed" };
+    }
+    logger.info(baseLog, "[mailer] rotation digest sent");
+    return { sent: true };
+  } catch (err) {
+    logger.error({ ...baseLog, err }, "[mailer] Resend transport threw (rotation digest)");
+    return { sent: false, errorCode: "transport_failed" };
+  }
+}
+
 export async function sendInviteEmail(input: InviteEmailInput): Promise<InviteEmailResult> {
   const redactedTo = redactEmail(input.to);
   const baseLog = { to: redactedTo, invitationId: input.invitationId };

@@ -83,6 +83,13 @@ export const users = pgTable(
     // client-side from the MASTER password. Used for vault-unlock gate.
     masterAuthKeyHash: text("master_auth_key_hash"),
 
+    // Phase C — crypto fix #2: per-user Argon2id salt for client-side master-key
+    // derivation. base64-encoded 32 random bytes. NOT a secret — handed back to
+    // the client pre-auth (`GET /auth/kdf-salt`) and in `GET /me`. Replaces the
+    // predictable legacy salt `userId.padEnd(16,"0")`. Nullable for backfill of
+    // pre-fix rows; new credential sites always populate it. See lib/kdfSalt.ts.
+    kdfSalt: text("kdf_salt"),
+
     // Recovery kit (DESIGN.md §6 — Phase A scaffolding for the zero-knowledge
     // recovery flow). The server stores ONLY an Argon2id hash of the recovery
     // code; the plaintext code is shown to the user exactly once at generation
@@ -239,6 +246,11 @@ export const auditEvents = pgTable(
     targetId: text("target_id"),
     targetName: text("target_name"),
     ipHash: text("ip_hash"),
+    // Coarse, privacy-preserving display of the caller IP: first two octets
+    // (IPv4) / hextets (IPv6), the rest masked. PDPA data-minimization — we
+    // NEVER store the full IP. Nullable: old rows stay null (no raw IP to
+    // backfill); `ipHash` above remains the HMAC for correlation.
+    ipMasked: text("ip_masked"),
     userAgent: text("user_agent"),
     success: boolean("success").notNull().default(true),
     metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
@@ -305,7 +317,21 @@ export const vaults = pgTable(
     description: text("description"),
     iconKey: text("icon_key"),
     color: text("color"), // validated by Zod at the route layer
-    encryptionVersion: integer("encryption_version").notNull().default(1),
+    encryptionVersion: integer("encryption_version").notNull().default(2),
+    // Phase C Wave-2b (AC-024.5 / FR-043). Monotonic generation counter for the
+    // vault key. Bumped on every client-driven re-key (POST /vaults/:id/rekey).
+    // Used for OPTIMISTIC CONCURRENCY: a rekey payload carries the keyVersion the
+    // client computed against; if it no longer matches the row (a concurrent
+    // rekey landed first) the write is rejected so two clients can't half-apply
+    // conflicting key generations.
+    keyVersion: integer("key_version").notNull().default(1),
+    // Set true the moment a member is revoked from a v2 vault (server-side access
+    // is cut by deleting their vault_keys row) to flag that the vault key is now
+    // STALE and must be rotated + every item re-encrypted by an admin/manager's
+    // browser (client-driven rekey). Cleared when a rekey completes. Residual
+    // until then: a revoked member who CACHED the old vault key can still decrypt
+    // old ciphertext they already had — inherent to client-side E2E (see report).
+    rekeyPending: boolean("rekey_pending").notNull().default(false),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -404,10 +430,20 @@ export const items = pgTable(
     type: text("type").notNull(),
     name: text("name").notNull(),
 
-    // Non-sensitive metadata kept in plaintext for list views + search.
-    // Searched by GET /search (US-017): name, username, url, type. NEVER the
-    // ciphertext columns or anything inside the encrypted notes meta blob
-    // (tags/totp/card/etc.) — those are secret-equivalent in Phase A.
+    // Non-sensitive metadata kept in plaintext for list views + search IN
+    // PHASE A (encryptionVersion=1). Searched by GET /search (US-017): name,
+    // username, url, type. NEVER the ciphertext columns or anything inside the
+    // encrypted notes meta blob (tags/totp/card/etc.) — those are secret-
+    // equivalent in Phase A.
+    //
+    // PHASE C ZK (encryptionVersion=2, FR-043 / AC-017.2 / NFR-032): metadata is
+    // secret too. New v2 items leave `name` as "" (empty placeholder — `name` is
+    // NOT NULL and cannot be dropped without breaking v1) and username/url NULL,
+    // carrying the real values in the *Ciphertext columns below. The server
+    // never sees the plaintext. Read paths tolerate BOTH shapes during the v3
+    // re-index transition: if a *Ciphertext column is present it is returned for
+    // the client to decrypt; otherwise the plaintext column is returned (legacy
+    // v2 rows written before this migration). v1 rows are unaffected.
     username: text("username"),
     url: text("url"),
 
@@ -416,6 +452,15 @@ export const items = pgTable(
     passwordIv: bytea("password_iv"),
     notesCiphertext: bytea("notes_ciphertext"),
     notesIv: bytea("notes_iv"),
+
+    // Phase C ZK metadata ciphertext (client-encrypted with the vault key).
+    // NULL for v1 items and for legacy v2 items not yet re-indexed (transition).
+    nameCiphertext: bytea("name_ciphertext"),
+    nameIv: bytea("name_iv"),
+    usernameCiphertext: bytea("username_ciphertext"),
+    usernameIv: bytea("username_iv"),
+    urlCiphertext: bytea("url_ciphertext"),
+    urlIv: bytea("url_iv"),
 
     // Per-item DEK wrapped by the LOCAL_KEK (Phase A) — will move to KMS in B.
     // NULL in Zero-Knowledge mode (encryptionVersion >= 2).
@@ -430,6 +475,14 @@ export const items = pgTable(
     // password. NULL = item never had a password (e.g. note). Drives the
     // frontend "password last changed X ago" display + rotation policy (FR-039).
     passwordChangedAt: timestamp("password_changed_at", { withTimezone: true }),
+
+    // US-060 / AC-060.1 / FR-039: per-item rotation window in days. NULL = "use
+    // the org default" (organizations.settings.rotationDefaultDays). A positive
+    // value overrides the org default; the value is clamped + 0/negative mapped
+    // to NULL at the route layer (see clampRotationDays in lib/orgPolicy.ts).
+    // The effective status (fresh/due/overdue/none) is computed in the serializer
+    // from passwordChangedAt + the effective policy — never stored.
+    rotationPolicyDays: integer("rotation_policy_days"),
 
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -461,6 +514,36 @@ export const items = pgTable(
       "gin",
       sql`${t.url} gin_trgm_ops`,
     ),
+  }),
+);
+
+// Phase C ZK blind index (FR-043 / AC-017.2 / NFR-032). One row per opaque
+// search token of a v2 item. The client derives a per-vault search key
+// (HKDF-SHA256 of the vault key) the server NEVER sees, normalizes each
+// searchable field (name/username/url/tags), tokenizes it into words + 3-grams,
+// then HMAC-SHA256(searchKey, token) → `term_hash`. The server stores only the
+// opaque hashes and matches a query's HMAC tokens by equality. It can neither
+// reverse a hash nor learn the plaintext or the search key. v1 items never
+// populate this table (they use the plaintext ILIKE path).
+//
+// Storage model: the (item_id, term_hash) composite PK dedupes repeated tokens
+// per item and gives a covering lookup; `term_hash` is also indexed on its own
+// so a query token can scan all matching items across the vault set. On every
+// v2 create/update the client sends the full token set and the server REPLACES
+// the item's rows (delete-all + insert) inside the write transaction.
+export const itemSearchTerms = pgTable(
+  "item_search_terms",
+  {
+    itemId: uuid("item_id")
+      .notNull()
+      .references(() => items.id, { onDelete: "cascade" }),
+    // Opaque HMAC-SHA256 digest (32 bytes). Never reversible to plaintext.
+    termHash: bytea("term_hash").notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.itemId, t.termHash] }),
+    // Drives the query-token → matching-items lookup in GET /search (v2 mode).
+    termHashIdx: index("item_search_terms_hash_idx").on(t.termHash),
   }),
 );
 
@@ -763,7 +846,9 @@ export const itemVersions = pgTable(
     iv: bytea("iv"),
     authTag: bytea("auth_tag"),
 
-    // Plaintext metadata snapshot (mirrors items.* — never secret).
+    // Plaintext metadata snapshot (mirrors items.* — never secret in v1/legacy
+    // v2; for v2 ZK items these are "" / NULL and the real values are in the
+    // *Ciphertext columns below — same shape as items).
     type: text("type").notNull(),
     name: text("name").notNull(),
     username: text("username"),
@@ -775,14 +860,30 @@ export const itemVersions = pgTable(
     notesCiphertext: bytea("notes_ciphertext"),
     notesIv: bytea("notes_iv"),
 
+    // Phase C ZK metadata-ciphertext snapshot (mirrors items.{name,username,url}
+    // Ciphertext). Wave-1 added these to `items` but NOT here, so a v2 snapshot
+    // captured name="" with no way to show the real (encrypted) name on
+    // restore/version-view. NULL for v1 + legacy v2 snapshots. The version-reveal
+    // endpoint returns these for the client to decrypt with the vault key, the
+    // same as the live item read path. NOT searchable — versions are never
+    // indexed in item_search_terms (see report).
+    nameCiphertext: bytea("name_ciphertext"),
+    nameIv: bytea("name_iv"),
+    usernameCiphertext: bytea("username_ciphertext"),
+    usernameIv: bytea("username_iv"),
+    urlCiphertext: bytea("url_ciphertext"),
+    urlIv: bytea("url_iv"),
+
     // Snapshot of the wrapped DEK so the version decrypts self-contained
     // (Phase A). NULL in ZK mode (encryptionVersion=2).
     dekCiphertext: bytea("dek_ciphertext"),
     dekIv: bytea("dek_iv"),
 
     // Which envelope generation this snapshot used (1 = Phase A server-side,
-    // 2 = ZK client blobs). Drives how the reveal endpoint decrypts.
-    encryptionVersion: integer("encryption_version").notNull().default(1),
+    // 2 = ZK client blobs). Drives how the reveal endpoint decrypts. Defaults
+    // to 2 (ZK) to match the live `items.encryption_version` default — all
+    // vaults are zero-knowledge now, so a snapshot is v2 unless explicitly v1.
+    encryptionVersion: integer("encryption_version").notNull().default(2),
 
     // Who made the edit that produced this snapshot (the editor of the NEW
     // state). Email denormalized so the history survives user deletion.

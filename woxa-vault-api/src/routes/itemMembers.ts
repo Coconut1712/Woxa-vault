@@ -4,7 +4,7 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 import { db } from "@/db/client";
 import { auditEvents, itemMembers, itemTeamMembers, items, teamMembers, teams, users, vaults, type Item } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { getOrgMembership } from "@/lib/orgAccess";
 import {
@@ -201,7 +201,7 @@ export const itemMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "item.share", targetType: "item", targetId: id, targetName: ctx.item.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { granteeUserId: body.userId, granteeEmail, role: body.role },
       });
       await createNotification(tx, {
@@ -237,7 +237,7 @@ export const itemMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "item.team_share", targetType: "item", targetId: id, targetName: ctx.item.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { granteeTeamId: body.teamId, granteeTeamName: team.name, role: body.role },
       });
 
@@ -274,7 +274,7 @@ export const itemMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "item.role_change", targetType: "item", targetId: id, targetName: ctx.item.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { granteeUserId: userId, granteeEmail: target.email, from: target.role, to: role },
       });
       await createNotification(tx, {
@@ -307,7 +307,7 @@ export const itemMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "item.team_role_change", targetType: "item", targetId: id, targetName: ctx.item.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { granteeTeamId: teamId, granteeTeamName: target.teamName, from: target.role, to: role },
       });
 
@@ -343,7 +343,7 @@ export const itemMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "item.revoke", targetType: "item", targetId: id, targetName: ctx.item.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { revokedUserId: userId, revokedEmail: target.email, role: target.role },
       });
       await createNotification(tx, {
@@ -374,7 +374,7 @@ export const itemMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "item.team_revoke", targetType: "item", targetId: id, targetName: ctx.item.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { revokedTeamId: teamId, revokedTeamName: target.teamName, role: target.role },
       });
 

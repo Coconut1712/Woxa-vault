@@ -1,10 +1,10 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { db } from "@/db/client";
 import { auditEvents, folders, type Folder } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { jsonValidator, paramValidator } from "@/lib/validator";
 import {
@@ -42,6 +42,12 @@ const createSchema = z.object({
   iconKey: z.string().trim().max(60).nullable().optional(),
   color: colorSchema.nullable().optional(),
   position: z.number().int().nonnegative().optional(),
+});
+
+// US-011.4 — bulk-reorder folders within a vault. `order` is the full desired
+// sequence of folder ids; index in the array becomes the new `position`.
+const reorderSchema = z.object({
+  order: z.array(z.string().uuid()).min(1).max(200),
 });
 
 const patchSchema = z.object({
@@ -129,7 +135,7 @@ export const vaultFolderRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "vault",
         targetId: id,
         targetName: viewer.vault.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: false,
         metadata: { reason: "insufficient_role", role: viewer.vaultRole },
@@ -174,7 +180,7 @@ export const vaultFolderRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "folder",
         targetId: row.id,
         targetName: row.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { vaultId: id },
@@ -183,7 +189,86 @@ export const vaultFolderRoutes = new Hono<{ Variables: AuthVariables }>()
     });
 
     return c.json({ folder: toDto(created) }, 201);
-  });
+  })
+
+  // ------------------------------------------------------------------
+  // PATCH /vaults/:id/folders/reorder — bulk reposition (US-011.4)
+  // ------------------------------------------------------------------
+  // Reorder requires content-edit authority on the vault (editor/manager) —
+  // same gate as folder create/update. Every id in `order` must belong to THIS
+  // vault; a foreign or unknown id rejects the whole batch (no partial reorder)
+  // so a caller can't smuggle another vault's folder into the update set.
+  .patch(
+    "/:id/folders/reorder",
+    paramValidator(vaultParam),
+    jsonValidator(reorderSchema),
+    async (c) => {
+      const user = c.get("user")!;
+      const { id } = c.req.valid("param");
+      const { order } = c.req.valid("json");
+
+      const viewer = await loadVaultForViewer(id, user.id);
+      if (!viewer) throw errors.notFound("Vault not found");
+      if (!viewer.vaultRole || !canManageItem(viewer.vaultRole)) {
+        await db.insert(auditEvents).values({
+          orgId: viewer.vault.orgId,
+          actorUserId: user.id,
+          actorEmail: user.email,
+          action: "folder.reorder_failed",
+          targetType: "vault",
+          targetId: id,
+          targetName: viewer.vault.name,
+          ...clientIpAuditFields(c),
+          userAgent: c.req.header("user-agent") ?? null,
+          success: false,
+          metadata: { reason: "insufficient_role", role: viewer.vaultRole },
+        });
+        throw errors.forbidden("Read-only access to this vault");
+      }
+
+      // Reject duplicate ids up front — a repeated id would otherwise leave two
+      // folders fighting for one position.
+      const unique = new Set(order);
+      if (unique.size !== order.length) {
+        throw errors.validation("Duplicate folder ids in order");
+      }
+
+      // Every id must be a live folder of THIS vault.
+      const owned = await db
+        .select({ id: folders.id })
+        .from(folders)
+        .where(and(eq(folders.vaultId, id), inArray(folders.id, order)));
+      if (owned.length !== order.length) {
+        throw errors.validation("One or more folders do not belong to this vault");
+      }
+
+      const now = new Date();
+      await db.transaction(async (tx) => {
+        for (let i = 0; i < order.length; i++) {
+          await tx
+            .update(folders)
+            .set({ position: i, updatedAt: now })
+            .where(and(eq(folders.id, order[i]!), eq(folders.vaultId, id)));
+        }
+
+        await tx.insert(auditEvents).values({
+          orgId: viewer.vault.orgId,
+          actorUserId: user.id,
+          actorEmail: user.email,
+          action: "folder.reorder",
+          targetType: "vault",
+          targetId: id,
+          targetName: viewer.vault.name,
+          ...clientIpAuditFields(c),
+          userAgent: c.req.header("user-agent") ?? null,
+          success: true,
+          metadata: { count: order.length },
+        });
+      });
+
+      return c.json({ ok: true });
+    },
+  );
 
 // Top-level /folders/:id router for PATCH + DELETE.
 export const folderRoutes = new Hono<{ Variables: AuthVariables }>()
@@ -215,7 +300,7 @@ export const folderRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "folder",
         targetId: id,
         targetName: row.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: false,
         metadata: { reason: "insufficient_role", role },
@@ -249,7 +334,7 @@ export const folderRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "folder",
       targetId: id,
       targetName: updated.name,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { fields: Object.keys(body) },
@@ -280,7 +365,7 @@ export const folderRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "folder",
         targetId: id,
         targetName: row.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: false,
         metadata: { reason: "insufficient_role", role },
@@ -300,7 +385,7 @@ export const folderRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "folder",
         targetId: id,
         targetName: row.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { vaultId: row.vaultId },

@@ -408,18 +408,18 @@ function formatDuration(totalMinutes: number | null, t: (k: string, p?: any) => 
   const h = Math.floor((totalMinutes % 1440) / 60);
   const m = totalMinutes % 60;
   const parts = [];
-  if (d > 0) parts.push(`${d}${t("requests.modal.duration_days").charAt(0).toLowerCase()}`);
-  if (h > 0) parts.push(`${h}${t("requests.modal.duration_hours").charAt(0).toLowerCase()}`);
-  if (m > 0) parts.push(`${m}${t("requests.modal.duration_minutes").charAt(0).toLowerCase()}`);
+  if (d > 0) parts.push(t("requests.duration.days", { n: d }));
+  if (h > 0) parts.push(t("requests.duration.hours", { n: h }));
+  if (m > 0) parts.push(t("requests.duration.minutes", { n: m }));
   return parts.join(" ");
 }
 
 function StatusBadge({ status }: { status: AccessRequestStatus }) {
   const t = useT();
   const styles: Record<AccessRequestStatus, { color: string; icon: any }> = {
-    pending: { color: "bg-amber-500/10 text-amber-600 border-amber-500/20", icon: Clock },
-    approved: { color: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20", icon: CheckCircle2 },
-    denied: { color: "bg-rose-500/10 text-rose-600 border-rose-500/20", icon: XCircle },
+    pending: { color: "bg-amber-500/15 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 dark:border-amber-500/20", icon: Clock },
+    approved: { color: "bg-emerald-500/15 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 dark:border-emerald-500/20", icon: CheckCircle2 },
+    denied: { color: "bg-rose-500/15 dark:bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/30 dark:border-rose-500/20", icon: XCircle },
     expired: { color: "bg-muted/50 text-muted-foreground border-border", icon: AlertCircle },
     cancelled: { color: "bg-muted/50 text-muted-foreground border-border", icon: X },
   };

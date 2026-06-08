@@ -14,3 +14,6 @@
 - [Two-Password Model](two_password_model.md) — login vs master field map, register invariants, vault_unlock auto-stamp residual
 - [Active Workspace Switching](active_workspace_switching.md) — M-1 multi-org: resolveActiveOrg seam, per-session pointer, call-site inventory, no role-bleed (SHIPPABLE)
 - [Workspace Security Settings + SSO](workspace_security_settings.md) — orgPolicy shape, ReDoS-safe DOMAIN_RE, requireSso phantom-control HIGH, cross-tenant SSO-allowlist DoS
+- [Team Access + Integrations](team_access_and_integrations.md) — granular ACL engine, team-grant authority caps, sweeper, Slack SSRF-safe, ZK scaffolding, viewer-notes-leak HIGH
+- [V1 Removal + Delete Gate](v1_removal_and_delete_gate.md) — plaintext metadata still accepted post-V1-removal; DeleteWithPasswordDialog client-only, deletes have no server proof
+- [Phase C ZK Crypto](project_phase_c_zk_crypto.md) — blind-index/rekey/migrate file map + standing weaknesses (homemade ECIES, static Argon salt, migration backup plaintext window, unscheduled purge)

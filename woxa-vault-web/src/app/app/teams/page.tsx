@@ -37,6 +37,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { DeleteWithPasswordDialog } from "@/components/shared/delete-with-password-dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
@@ -61,6 +62,7 @@ import { formatDate } from "@/lib/format";
 import { useT } from "@/lib/i18n/provider";
 import { useAuth } from "@/lib/auth/provider";
 import { isWorkspaceAdmin, canWriteVaultData } from "@/lib/auth/permissions";
+import { cn } from "@/lib/utils";
 
 export default function TeamsPage() {
   const t = useT();
@@ -206,26 +208,34 @@ export default function TeamsPage() {
         />
       )}
 
-      <Dialog open={!!deleteId} onOpenChange={(open) => !open && setDeleteId(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("api.error.delete_failed")}</DialogTitle>
-            <DialogDescription>
-              This action cannot be undone. All members will be removed from this team.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteId(null)}>
-              {t("common.cancel")}
-            </Button>
-            <Button variant="destructive" onClick={handleDelete}>
-              {t("common.delete")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <DeleteWithPasswordDialog
+        open={!!deleteId}
+        onOpenChange={(open) => !open && setDeleteId(null)}
+        title={t("teams.delete.title", {
+          name: teams.find((team) => team.id === deleteId)?.name ?? "",
+        })}
+        description={t("teams.delete.desc")}
+        onConfirmed={handleDelete}
+      />
     </>
   );
+}
+
+// Derive a stable accent color from the team name so each team has a unique
+// visual identity instead of every card being the same brand blue.
+const TEAM_PALETTE = [
+  { bg: "bg-violet-500/15 dark:bg-violet-500/10", ring: "ring-violet-500/30 dark:ring-violet-500/20", text: "text-violet-600 dark:text-violet-400" },
+  { bg: "bg-blue-500/15 dark:bg-blue-500/10",    ring: "ring-blue-500/30 dark:ring-blue-500/20",    text: "text-blue-600 dark:text-blue-400" },
+  { bg: "bg-emerald-500/15 dark:bg-emerald-500/10", ring: "ring-emerald-500/30 dark:ring-emerald-500/20", text: "text-emerald-600 dark:text-emerald-400" },
+  { bg: "bg-amber-500/15 dark:bg-amber-500/10",  ring: "ring-amber-500/30 dark:ring-amber-500/20",  text: "text-amber-600 dark:text-amber-400" },
+  { bg: "bg-rose-500/15 dark:bg-rose-500/10",    ring: "ring-rose-500/30 dark:ring-rose-500/20",    text: "text-rose-600 dark:text-rose-400" },
+  { bg: "bg-cyan-500/15 dark:bg-cyan-500/10",    ring: "ring-cyan-500/30 dark:ring-cyan-500/20",    text: "text-cyan-600 dark:text-cyan-400" },
+] as const;
+
+function teamPalette(name: string) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return TEAM_PALETTE[hash % TEAM_PALETTE.length]!;
 }
 
 function TeamCard({
@@ -242,48 +252,60 @@ function TeamCard({
   onDelete: () => void;
 }) {
   const t = useT();
+  const accent = teamPalette(team.name);
+  const initial = (team.name || "?").trim().charAt(0).toUpperCase();
+
   return (
-    <Card className="hover:border-brand/40 transition-colors group">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-start gap-3 min-w-0">
-          <div className="size-10 rounded-xl bg-brand/10 text-brand border border-brand/20 flex items-center justify-center shrink-0">
-            <UsersIcon className="size-5" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h3 className="font-semibold text-foreground truncate group-hover:text-brand transition-colors">
-              {team.name}
-            </h3>
-            {team.description && (
-              <p className="text-xs text-muted-foreground line-clamp-1 mt-0.5">
-                {team.description}
-              </p>
-            )}
-            <div className="flex items-center gap-3 mt-3">
-              <button
-                type="button"
-                onClick={onManageMembers}
-                className="flex items-center gap-1.5 text-xs text-muted-foreground font-medium hover:text-brand transition-colors"
-              >
-                <UsersIcon className="size-3.5" />
-                {team.memberCount} {t("teams.col.members").toLowerCase()}
-              </button>
-              <div className="size-1 rounded-full bg-border" />
-              <div className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">
-                {formatDate(team.createdAt)}
-              </div>
-            </div>
+    <Card className="hover:border-brand/40 transition-colors group relative">
+      <div className="flex items-start justify-between gap-3 px-4">
+        {/* Avatar — unique color per team, initial letter */}
+        <div className={cn(
+          "size-10 rounded-xl ring-1 flex items-center justify-center shrink-0 text-sm font-bold select-none",
+          accent.bg, accent.ring, accent.text,
+        )}>
+          {initial}
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <h3 className="font-semibold text-foreground truncate group-hover:text-brand transition-colors leading-snug">
+            {team.name}
+          </h3>
+          {team.description && (
+            <p className="text-xs text-muted-foreground line-clamp-1 mt-0.5">
+              {team.description}
+            </p>
+          )}
+          <div className="flex items-center gap-2 mt-2.5">
+            <button
+              type="button"
+              onClick={onManageMembers}
+              className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground hover:text-brand transition-colors"
+            >
+              <UsersIcon className="size-3" />
+              {team.memberCount} {t("teams.col.members").toLowerCase()}
+            </button>
+            <span className="text-border text-xs">·</span>
+            <span className="text-[11px] text-muted-foreground/70">
+              {formatDate(team.createdAt)}
+            </span>
           </div>
         </div>
 
+        {/* 3-dot — hidden until hover so the card stays clean */}
         {canEdit && (
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
-                <Button variant="ghost" size="icon" className="size-8">
-                  <MoreHorizontal className="size-4" />
-                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                  aria-label={t("common.more")}
+                />
               }
-            />
+            >
+              <MoreHorizontal className="size-3.5" />
+            </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48">
               <DropdownMenuItem onClick={onManageMembers}>
                 <UsersIcon className="size-4" /> {t("teams.members.manage")}
@@ -291,10 +313,7 @@ function TeamCard({
               <DropdownMenuItem onClick={onEdit}>
                 <Pencil className="size-4" /> {t("common.edit")}
               </DropdownMenuItem>
-              <DropdownMenuItem
-                variant="destructive"
-                onClick={onDelete}
-              >
+              <DropdownMenuItem variant="destructive" onClick={onDelete}>
                 <Trash2 className="size-4" /> {t("common.delete")}
               </DropdownMenuItem>
             </DropdownMenuContent>

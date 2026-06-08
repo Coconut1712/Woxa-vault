@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Star,
   Search,
@@ -9,6 +10,9 @@ import {
   Send,
   Plus,
   StarOff,
+  Pencil,
+  Trash2,
+  UserPlus,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -16,27 +20,56 @@ import { Topbar } from "@/components/layout/topbar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { IconTile } from "@/components/icon";
 import { NewItemDialog } from "@/components/vault/new-item-dialog";
+import { EditItemDialog } from "@/components/vault/edit-item-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   ApiErrorState,
   ApiLoadingState,
 } from "@/components/shared/api-states";
 import {
+  deleteDisplayItem,
+  getDisplayItem,
+  getItemPassword,
   listDisplayItems,
   toggleFavorite,
+  VaultLockedError,
+  type DisplayItemFull,
   type DisplayItemSummary,
 } from "@/lib/items-overlay";
 import { ApiError } from "@/lib/api/client";
+import type { VaultRole } from "@/lib/api/types";
 import { useVaults } from "@/lib/vaults/provider";
+import { useVaultLock } from "@/components/vault-lock/lock-provider";
 import { timeAgo, itemTypeColor } from "@/lib/format";
 import { useT } from "@/lib/i18n/provider";
 import { useAuth } from "@/lib/auth/provider";
-import { canEditItemRole, canWriteVaultData } from "@/lib/auth/permissions";
+import {
+  canEditItemRole,
+  canRevealItem,
+  canWriteVaultData,
+} from "@/lib/auth/permissions";
 
 export default function FavoritesPage() {
   const tr = useT();
+  const router = useRouter();
   const { vaults } = useVaults();
+  const { getVaultKey } = useVaultLock();
   const { me } = useAuth();
   // Guests are read-only: hide new-item, one-time-send, and unfavorite (these
   // are all writes that the backend 403s for guests).
@@ -49,14 +82,26 @@ export default function FavoritesPage() {
   const [items, setItems] = useState<DisplayItemSummary[]>([]);
   const [error, setError] = useState<ApiError | null>(null);
   const [loading, setLoading] = useState(true);
+  const [editItem, setEditItem] = useState<DisplayItemFull | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       // Round 2 has no /favorites endpoint — gather from every vault list.
+      // For v2 (ZK) vaults fetch the key so names decrypt; a locked vault
+      // yields null and those rows show the 🔒 placeholder.
       const lists = await Promise.all(
-        vaults.map((v) => listDisplayItems(v.id)),
+        vaults.map(async (v) => {
+          const vaultKey =
+            v.encryptionVersion === 2 ? await getVaultKey(v.id) : undefined;
+          return listDisplayItems(v.id, undefined, vaultKey ?? undefined);
+        }),
       );
       setItems(lists.flat().filter((i) => i.displayFavorite));
     } catch (err) {
@@ -65,7 +110,7 @@ export default function FavoritesPage() {
     } finally {
       setLoading(false);
     }
-  }, [vaults]);
+  }, [vaults, getVaultKey]);
 
   useEffect(() => {
     if (vaults.length > 0) {
@@ -77,13 +122,67 @@ export default function FavoritesPage() {
 
   const handleUnfavorite = async (id: string) => {
     try {
+      // v2 (ZK) vault: persisting re-encrypts the notes meta blob, so fetch the
+      // item's vault key. A locked vault → VaultLockedError → "unlock first".
+      const target = items.find((p) => p.id === id);
+      const targetVault = target
+        ? vaults.find((v) => v.id === target.vaultId)
+        : undefined;
+      const vaultKey =
+        targetVault?.encryptionVersion === 2
+          ? await getVaultKey(targetVault.id)
+          : null;
       // Guests may (un)favorite, but read-only: persist client-side only.
-      await toggleFavorite(id, { persist: canWrite });
+      await toggleFavorite(id, { persist: canWrite, vaultKey });
       setItems((prev) => prev.filter((p) => p.id !== id));
     } catch (err) {
+      if (err instanceof VaultLockedError) {
+        toast.error(tr("item.favorite_locked"), {
+          description: tr("item.favorite_locked_desc"),
+        });
+        return;
+      }
       const description =
         err instanceof ApiError ? err.message : tr("api.error.generic");
       toast.error(tr("api.error.save_failed"), { description });
+    }
+  };
+
+  const handleEditItem = async (itemId: string) => {
+    try {
+      const full = await getDisplayItem(itemId);
+      let password = "";
+      if (full.hasPassword) {
+        try {
+          password = (await getItemPassword(itemId)) ?? "";
+        } catch {
+          password = "";
+        }
+      }
+      setEditItem({ ...full, password });
+    } catch (err) {
+      const description =
+        err instanceof ApiError ? err.message : tr("api.error.generic");
+      toast.error(tr("api.error.generic"), { description });
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget || deleteBusy) return;
+    setDeleteBusy(true);
+    try {
+      await deleteDisplayItem(deleteTarget.id);
+      toast.success(tr("item.deleted_toast"), {
+        description: deleteTarget.name,
+      });
+      setItems((prev) => prev.filter((p) => p.id !== deleteTarget.id));
+      setDeleteTarget(null);
+    } catch (err) {
+      const description =
+        err instanceof ApiError ? err.message : tr("api.error.generic");
+      toast.error(tr("api.error.delete_failed"), { description });
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -135,6 +234,13 @@ export default function FavoritesPage() {
               <div className="rounded-2xl border border-border bg-card card-elevated shadow-card divide-y divide-border overflow-hidden">
                 {filtered.map((item) => {
                   const vault = vaults.find((v) => v.id === item.vaultId);
+                  const itemRole: VaultRole =
+                    item.effectiveRole ??
+                    vault?.role ??
+                    item.displayEffectiveRole;
+                  const canSendThisItem = canRevealItem(itemRole) && canWrite;
+                  const canEditThisItem = canEditItemRole(itemRole) && canWrite;
+                  const hasRowMenu = canSendThisItem || canEditThisItem;
                   return (
                     <div
                       key={item.id}
@@ -174,16 +280,6 @@ export default function FavoritesPage() {
                       </Link>
 
                       <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
-                        {/* Send is a share action — hidden for guests. */}
-                        {canWrite && (
-                          <Link
-                            href={`/app/sends/new?item=${item.id}`}
-                            aria-label={tr("vault.send_one_time")}
-                            className="p-1.5 rounded hover:bg-surface-2 text-muted-foreground hover:text-foreground"
-                          >
-                            <Send className="size-3.5" />
-                          </Link>
-                        )}
                         {/* Unfavorite available to ALL roles incl. guest
                             (read-only users persist it client-side only). */}
                         <button
@@ -194,14 +290,59 @@ export default function FavoritesPage() {
                         >
                           <StarOff className="size-3.5" />
                         </button>
-                        {canWrite && (
-                          <button
-                            aria-label={tr("common.more")}
-                            title={tr("common.more")}
-                            className="p-1.5 rounded hover:bg-surface-2 text-muted-foreground hover:text-foreground"
-                          >
-                            <MoreHorizontal className="size-3.5" />
-                          </button>
+                        {hasRowMenu && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger
+                              render={
+                                <button
+                                  type="button"
+                                  aria-label={tr("common.more")}
+                                  title={tr("common.more")}
+                                  className="p-1.5 rounded hover:bg-surface-2 text-muted-foreground hover:text-foreground"
+                                />
+                              }
+                            >
+                              <MoreHorizontal className="size-3.5" />
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-48">
+                              <DropdownMenuGroup>
+                                {canSendThisItem && (
+                                  <DropdownMenuItem
+                                    onClick={() =>
+                                      router.push(
+                                        `/app/sends/new?item=${item.id}`,
+                                      )
+                                    }
+                                  >
+                                    <Send className="size-3.5" />
+                                    {tr("vault.send_one_time")}
+                                  </DropdownMenuItem>
+                                )}
+                                {canEditThisItem && (
+                                  <DropdownMenuItem
+                                    onClick={() => void handleEditItem(item.id)}
+                                  >
+                                    <Pencil className="size-3.5" />
+                                    {tr("item.edit")}
+                                  </DropdownMenuItem>
+                                )}
+                                {canEditThisItem && (
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    onClick={() =>
+                                      setDeleteTarget({
+                                        id: item.id,
+                                        name: item.name,
+                                      })
+                                    }
+                                  >
+                                    <Trash2 className="size-3.5" />
+                                    {tr("item.delete.button")}
+                                  </DropdownMenuItem>
+                                )}
+                              </DropdownMenuGroup>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         )}
                       </div>
                     </div>
@@ -218,6 +359,44 @@ export default function FavoritesPage() {
           )}
         </div>
       </div>
+
+      {editItem && (
+        <EditItemDialog
+          open={!!editItem}
+          onOpenChange={(o) => !o && setEditItem(null)}
+          item={editItem}
+          onSaved={async () => {
+            setEditItem(null);
+            await load();
+          }}
+        />
+      )}
+
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{tr("item.delete.title")}</DialogTitle>
+            <DialogDescription>
+              {tr("item.delete.desc", { name: deleteTarget?.name ?? "" })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}>
+              {tr("common.cancel")}
+            </Button>
+            <Button
+              className="bg-rose-500 text-white hover:bg-rose-500/90"
+              onClick={() => void handleConfirmDelete()}
+              disabled={deleteBusy}
+            >
+              <Trash2 className="size-3.5" /> {tr("item.delete.button")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <NewItemDialog open={newItemOpen} onOpenChange={setNewItemOpen} />
     </>

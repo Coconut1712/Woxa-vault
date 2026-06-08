@@ -22,8 +22,8 @@ export interface OrgMember {
   role: OrgRole;
   joinedAt: string;
   status: OrgMemberStatus;
-  /** Some backends include this; treat as best-effort metadata. */
   lastActiveAt?: string | null;
+  lastLoginAt?: string | null;
   /** Free-form name some endpoints carry. */
   name?: string;
 

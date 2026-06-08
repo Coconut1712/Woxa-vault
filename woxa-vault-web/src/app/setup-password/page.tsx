@@ -37,15 +37,17 @@ import {
 import { RecoveryKitModal } from "@/components/auth/recovery-kit-modal";
 import { ApiError } from "@/lib/api/client";
 import { setupPassword } from "@/lib/api/me";
+import { getKdfSalt } from "@/lib/api/auth";
 import { useAuth } from "@/lib/auth/provider";
 import { useT } from "@/lib/i18n/provider";
 import { persistUnlockTimestamp, persistPrivateKey } from "@/components/vault-lock/lock-provider";
-import { 
-  deriveMasterKey, 
-  deriveAuthKeyHash, 
-  generateUserKeypair, 
+import {
+  deriveMasterKey,
+  deriveAuthKeyHash,
+  generateUserKeypair,
   encryptPrivateKey,
-  toBase64
+  toBase64,
+  fromBase64
 } from "@/lib/crypto-client";
 
 export default function SetupPasswordPage() {
@@ -86,9 +88,13 @@ export default function SetupPasswordPage() {
     if (blocking || !me) return;
     setSubmitting(true);
     try {
-      // Phase C: Generate ZK Keys
-      const masterKey = await deriveMasterKey(password, me.id);
-      const masterAuthKeyHash = await deriveAuthKeyHash(masterKey, me.id);
+      // Phase C: Generate ZK Keys. Use the server-issued per-user KDF salt so
+      // the master key derived here matches the one re-derived at unlock. Prefer
+      // the salt already on /me; fall back to a direct lookup if absent.
+      const saltB64 = me.kdfSalt ?? (await getKdfSalt(me.email));
+      const salt = fromBase64(saltB64);
+      const masterKey = await deriveMasterKey(password, salt);
+      const masterAuthKeyHash = await deriveAuthKeyHash(masterKey, salt);
       
       const { publicKey, privateKey } = generateUserKeypair();
       const encrypted = await encryptPrivateKey(privateKey, masterKey);

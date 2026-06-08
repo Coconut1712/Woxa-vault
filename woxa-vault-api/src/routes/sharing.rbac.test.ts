@@ -47,7 +47,6 @@ async function loadDeps() {
   );
   const { eq, inArray } = await import("drizzle-orm");
   const { createSession, SESSION_COOKIE_NAME } = await import("@/lib/session");
-  const { generateWrappedDek, encryptField, zeroize } = await import("@/lib/itemCrypto");
   return {
     app: createApp(),
     db,
@@ -63,9 +62,6 @@ async function loadDeps() {
     inArray,
     createSession,
     SESSION_COOKIE_NAME,
-    generateWrappedDek,
-    encryptField,
-    zeroize,
   };
 }
 
@@ -113,14 +109,14 @@ describe("Granular folder/item sharing (integration)", () => {
     });
     await deps.db.insert(deps.orgMembers).values({ orgId, userId, role: orgRole });
     createdUserIds.push(userId);
-    const { token } = await deps.createSession(userId);
+    const { token } = await deps.createSession(userId, {}, true);
     return { userId, cookie: `${deps.SESSION_COOKIE_NAME}=${token}` };
   }
 
   async function makeVault(createdBy: string): Promise<string> {
     const [v] = await deps.db
       .insert(deps.vaults)
-      .values({ orgId, name: `vault-${randomUUID().slice(0, 8)}`, createdBy })
+      .values({ orgId, name: `vault-${randomUUID().slice(0, 8)}`, createdBy, encryptionVersion: 1 })
       .returning();
     createdVaultIds.push(v!.id);
     return v!.id;
@@ -138,35 +134,28 @@ describe("Granular folder/item sharing (integration)", () => {
     return f!.id;
   }
 
-  // Create an item directly in the DB with a real wrapped DEK + encrypted
-  // password, so the reveal path actually decrypts.
+  // Create a zero-knowledge item directly in the DB. The "secret" is treated as
+  // an OPAQUE client blob (the server never decrypts in ZK mode) — we store it
+  // base64-encoded as passwordCiphertext so the reveal path returns it verbatim.
   async function makeItem(
     vaultId: string,
     createdBy: string,
     folderId: string | null = null,
     secret = "s3cret",
   ): Promise<string> {
-    const { dek, wrapped } = deps.generateWrappedDek();
-    try {
-      const enc = deps.encryptField(dek, secret);
-      const [it] = await deps.db
-        .insert(deps.items)
-        .values({
-          vaultId,
-          type: "login",
-          name: `item-${randomUUID().slice(0, 8)}`,
-          folderId,
-          passwordCiphertext: enc.ciphertext,
-          passwordIv: enc.iv,
-          dekCiphertext: wrapped.dekCiphertext,
-          dekIv: wrapped.dekIv,
-          createdBy,
-        })
-        .returning();
-      return it!.id;
-    } finally {
-      deps.zeroize(dek);
-    }
+    const [it] = await deps.db
+      .insert(deps.items)
+      .values({
+        vaultId,
+        type: "login",
+        name: `item-${randomUUID().slice(0, 8)}`,
+        folderId,
+        passwordCiphertext: Buffer.from(secret),
+        passwordIv: Buffer.from("iv-aaaaaaaaa"),
+        createdBy,
+      })
+      .returning();
+    return it!.id;
   }
 
   function req(path: string, cookie: string, init: RequestInit = {}) {
@@ -277,7 +266,10 @@ describe("Granular folder/item sharing (integration)", () => {
     expect(revealBody.item.password).toBeNull();
     const pw = await req(`/items/${sharedItem}/password`, outsider.cookie);
     expect(pw.status).toBe(200);
-    expect(((await pw.json()) as { password: string | null }).password).toBe("shared-pw");
+    // ZK reveal hands back the opaque ciphertext blob (base64), not plaintext.
+    expect(((await pw.json()) as { passwordCiphertext: string | null }).passwordCiphertext).toBe(
+      Buffer.from("shared-pw").toString("base64"),
+    );
 
     // Cannot see the OTHER item.
     const other = await req(`/items/${otherItem}`, outsider.cookie);

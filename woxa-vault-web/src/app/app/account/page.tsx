@@ -3,10 +3,13 @@
 import { Suspense, useCallback, useEffect, useState, type FormEvent } from "react";
 import { useSearchParams } from "next/navigation";
 import {
+  Activity,
   AlertCircle,
   AlertTriangle,
   Bell,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Crown,
   Eye,
   EyeOff,
@@ -19,6 +22,8 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Shield,
+  ShieldAlert,
   ShieldCheck,
   User,
   UserCog,
@@ -66,18 +71,26 @@ import {
   getNotificationSettings,
   updateNotificationSettings,
   type NotificationSettings,
+  getMyActivity,
+  type ActivityEvent,
 } from "@/lib/api/me";
 import type { OrgRole } from "@/lib/api/members";
 import { useAuth } from "@/lib/auth/provider";
-import { formatDate, formatDateTime } from "@/lib/format";
+import { formatDate, formatDateTime, timeAgo } from "@/lib/format";
 import { useT } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 
-type Section = "profile" | "security" | "notifications" | "integrations";
+type Section =
+  | "profile"
+  | "security"
+  | "activity"
+  | "notifications"
+  | "integrations";
 
 const ACCOUNT_SECTIONS = new Set<Section>([
   "profile",
   "security",
+  "activity",
   "notifications",
   "integrations",
 ]);
@@ -173,6 +186,11 @@ function AccountPageContent() {
       icon: ShieldCheck,
     },
     {
+      id: "activity" as const,
+      label: t("activity.tab"),
+      icon: Activity,
+    },
+    {
       id: "notifications" as const,
       label: t("settings.notifications"),
       icon: Bell,
@@ -216,6 +234,9 @@ function AccountPageContent() {
               )}
               {active === "security" && (
                 <SecuritySection me={me} onUpdated={setMe} />
+              )}
+              {active === "activity" && (
+                <ActivitySection onGoToSecurity={() => setActive("security")} />
               )}
               {active === "notifications" && <NotificationsSection />}
               {active === "integrations" && <IntegrationsSection />}
@@ -866,6 +887,283 @@ function SessionsCard() {
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+/* =====================================================================
+   MY ACTIVITY — AC-041.1–3, wired to GET /me/activity
+   ===================================================================== */
+const ACTIVITY_PAGE_SIZE = 25;
+
+/** Auth-related events get a Shield; vault/key events a Key; everything else Eye. */
+function activityIcon(action: string): React.ComponentType<{ className?: string }> {
+  if (
+    action.includes("login") ||
+    action.includes("logout") ||
+    action.includes("session") ||
+    action.includes("password") ||
+    action.includes("2fa") ||
+    action.includes("recovery") ||
+    action.includes("unlock")
+  ) {
+    return Shield;
+  }
+  if (
+    action.includes("vault") ||
+    action.includes("key") ||
+    action.includes("folder") ||
+    action.includes("rekey") ||
+    action.includes("migrate")
+  ) {
+    return Key;
+  }
+  return Eye;
+}
+
+/** `account.vault_unlock_success` → "Vault unlock success". */
+function formatActionLabel(action: string): string {
+  const cleaned = action.replace(/^account\./, "").replace(/_/g, " ").trim();
+  if (!cleaned) return action;
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+/** Crude UA → "Chrome on macOS". No library — substring checks only. */
+function parseUserAgent(ua: string | null): string | null {
+  if (!ua) return null;
+  let browser = "";
+  if (ua.includes("Edg")) browser = "Edge";
+  else if (ua.includes("OPR") || ua.includes("Opera")) browser = "Opera";
+  else if (ua.includes("Chrome")) browser = "Chrome";
+  else if (ua.includes("Firefox")) browser = "Firefox";
+  else if (ua.includes("Safari")) browser = "Safari";
+
+  let os = "";
+  if (ua.includes("Windows")) os = "Windows";
+  else if (ua.includes("Mac OS") || ua.includes("Macintosh")) os = "macOS";
+  else if (ua.includes("Android")) os = "Android";
+  else if (ua.includes("iPhone") || ua.includes("iPad") || ua.includes("iOS"))
+    os = "iOS";
+  else if (ua.includes("Linux")) os = "Linux";
+
+  if (browser && os) return `${browser} on ${os}`;
+  return browser || os || null;
+}
+
+const SUSPICIOUS_ACTIONS = new Set([
+  "account.vault_unlock_failed",
+  "account.login_failed",
+]);
+
+function ActivitySection({ onGoToSecurity }: { onGoToSecurity: () => void }) {
+  const t = useT();
+  const [page, setPage] = useState(1);
+  const [events, setEvents] = useState<ActivityEvent[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setLoading(true);
+    setLoadError(false);
+    void (async () => {
+      try {
+        const res = await getMyActivity({
+          page,
+          limit: ACTIVITY_PAGE_SIZE,
+          signal: ctrl.signal,
+        });
+        if (ctrl.signal.aborted) return;
+        setEvents(res.events);
+        setTotal(res.total);
+      } catch (err) {
+        if (ctrl.signal.aborted) return;
+        setLoadError(true);
+      } finally {
+        if (!ctrl.signal.aborted) setLoading(false);
+      }
+    })();
+    return () => ctrl.abort();
+  }, [page]);
+
+  const totalPages = Math.max(1, Math.ceil(total / ACTIVITY_PAGE_SIZE));
+
+  return (
+    <div className="space-y-6">
+      <SectionTitle
+        title={t("activity.section_title")}
+        description={t("activity.section_desc")}
+      />
+
+      <Card>
+        {loading && (
+          <div className="space-y-2" aria-busy aria-label={t("activity.loading")}>
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div
+                key={i}
+                className="flex items-center gap-3 p-3 rounded-lg bg-surface-1 border border-line-1"
+              >
+                <div className="size-8 rounded-lg bg-surface-3 animate-pulse" />
+                <div className="flex-1 space-y-1.5">
+                  <div className="h-3 w-40 rounded bg-surface-3 animate-pulse" />
+                  <div className="h-2.5 w-28 rounded bg-surface-3 animate-pulse" />
+                </div>
+                <div className="h-5 w-14 rounded bg-surface-3 animate-pulse" />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!loading && loadError && (
+          <div className="flex flex-col items-center justify-center py-12 text-center">
+            <span className="size-10 rounded-xl bg-rose-500/[0.10] dark:bg-rose-500/[0.04] text-rose-700 dark:text-rose-300 flex items-center justify-center mb-3">
+              <AlertTriangle className="size-5" />
+            </span>
+            <p className="text-sm font-medium">{t("activity.load_failed")}</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-3"
+              onClick={() => setPage((p) => p)}
+            >
+              <RefreshCw className="size-3.5" />
+              {t("common.retry")}
+            </Button>
+          </div>
+        )}
+
+        {!loading && !loadError && events.length === 0 && (
+          <div className="flex flex-col items-center justify-center py-12 text-center">
+            <span className="size-10 rounded-xl bg-surface-2 text-muted-foreground flex items-center justify-center mb-3">
+              <Shield className="size-5" />
+            </span>
+            <p className="text-sm font-medium">{t("activity.empty")}</p>
+            <p className="text-xs text-muted-foreground mt-1 max-w-xs">
+              {t("activity.empty_desc")}
+            </p>
+          </div>
+        )}
+
+        {!loading && !loadError && events.length > 0 && (
+          <div className="space-y-2">
+            {events.map((event) => (
+              <ActivityRow
+                key={event.id}
+                event={event}
+                onGoToSecurity={onGoToSecurity}
+              />
+            ))}
+          </div>
+        )}
+
+        {!loading && !loadError && events.length > 0 && (
+          <div className="flex items-center justify-between gap-3 mt-4 pt-4 border-t border-line-1">
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {t("activity.page_of", { page, total: totalPages })}
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+              >
+                <ChevronLeft className="size-3.5" />
+                {t("common.previous")}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page >= totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              >
+                {t("common.next")}
+                <ChevronRight className="size-3.5" />
+              </Button>
+            </div>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function ActivityRow({
+  event,
+  onGoToSecurity,
+}: {
+  event: ActivityEvent;
+  onGoToSecurity: () => void;
+}) {
+  const t = useT();
+  const Icon = activityIcon(event.action);
+  const device = parseUserAgent(event.userAgent);
+  const suspicious = SUSPICIOUS_ACTIONS.has(event.action);
+
+  return (
+    <div className="flex items-center gap-3 p-3 rounded-lg bg-surface-1 border border-line-1">
+      <span
+        className={cn(
+          "size-8 rounded-lg flex items-center justify-center shrink-0",
+          event.success
+            ? "bg-surface-2 text-muted-foreground"
+            : "bg-rose-500/[0.10] dark:bg-rose-500/[0.04] text-rose-700 dark:text-rose-300",
+        )}
+      >
+        <Icon className="size-4" />
+      </span>
+
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-medium truncate">
+            {formatActionLabel(event.action)}
+          </span>
+          {event.targetName && (
+            <span className="text-xs text-muted-foreground truncate">
+              {event.targetName}
+            </span>
+          )}
+          {suspicious && (
+            <button
+              type="button"
+              onClick={onGoToSecurity}
+              className="inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10px] font-medium bg-amber-500/15 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/30 dark:border-amber-500/20 hover:bg-amber-500/25 dark:hover:bg-amber-500/20 transition-colors"
+            >
+              <ShieldAlert className="size-3" />
+              {t("activity.unrecognized")}
+            </button>
+          )}
+        </div>
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-0.5">
+          <span title={formatDateTime(event.createdAt)}>
+            {timeAgo(event.createdAt)}
+          </span>
+          {device && (
+            <>
+              <span aria-hidden>·</span>
+              <span className="truncate">{device}</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      <Badge
+        variant="outline"
+        className={cn(
+          "text-[10px] h-5 px-1.5 gap-1 shrink-0",
+          event.success
+            ? "bg-emerald-500/15 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 dark:border-emerald-500/20"
+            : "bg-rose-500/15 dark:bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30 dark:border-rose-500/20",
+        )}
+      >
+        {event.success ? (
+          <CheckCircle2 className="size-3" />
+        ) : (
+          <AlertCircle className="size-3" />
+        )}
+        {event.success ? t("activity.success") : t("activity.failed")}
+      </Badge>
+    </div>
   );
 }
 

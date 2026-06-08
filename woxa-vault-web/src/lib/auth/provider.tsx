@@ -35,6 +35,7 @@ import {
   register as registerRequest,
   verifyMfaLogin as verifyMfaLoginRequest,
   getLoginInfo,
+  getKdfSalt,
   type AuthUser,
   type LoginResult,
 } from "@/lib/api/auth";
@@ -44,12 +45,13 @@ import {
   persistUnlockTimestamp, 
   persistPrivateKey 
 } from "@/components/vault-lock/lock-provider";
-import { 
-  deriveMasterKey, 
-  deriveAuthKeyHash, 
-  decryptPrivateKey, 
-  fromBase64 
+import {
+  deriveMasterKey,
+  deriveAuthKeyHash,
+  decryptPrivateKey,
+  fromBase64
 } from "@/lib/crypto-client";
+import { selectLoginFactor } from "@/lib/auth/select-login-factor";
 
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
 
@@ -170,15 +172,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(
     async (email: string, password: string): Promise<LoginResult> => {
-      // Phase C: Fetch login info to see if we need ZK
+      // Phase C: Fetch login info to choose the auth factor.
       const info = await getLoginInfo(email);
-      let authPayload: { email: string; password?: string; authKeyHash?: string } = { email };
+      const authPayload: { email: string; password?: string; authKeyHash?: string } = { email };
       let masterKey: Uint8Array | null = null;
 
-      if (info.requiresZk) {
-        masterKey = await deriveMasterKey(password, info.userId);
-        authPayload.authKeyHash = await deriveAuthKeyHash(masterKey, info.userId);
+      // LOGIN factor selection: prefer the LOGIN password when one exists.
+      // `requiresZk` describes the VAULT-UNLOCK master factor and must NOT
+      // drive login — an account with both a login password and a legacy
+      // auth_key_hash (test@gmail.com shape) must authenticate against
+      // login_password_hash, not derive a ZK hash from the typed login password
+      // (which would never match the master-derived auth key). See
+      // select-login-factor.ts for the full rationale + regression coverage.
+      const factor = selectLoginFactor(info);
+
+      if (factor === "zk") {
+        // Legacy ZK-only account (no login password): derive with the
+        // server-issued per-user salt. login-info may not carry it; fetch via
+        // the dedicated /auth/kdf-salt lookup (falls back to login-info's
+        // kdfSalt if a future backend inlines it there).
+        const saltB64 = info.kdfSalt ?? (await getKdfSalt(email));
+        const salt = fromBase64(saltB64);
+        masterKey = await deriveMasterKey(password, salt);
+        authPayload.authKeyHash = await deriveAuthKeyHash(masterKey, salt);
       } else {
+        // Login-password path: send the plaintext login password. Deliberately
+        // do NOT derive a master key — the vault stays LOCKED after login and
+        // the user unlocks separately via the lock screen (which derives the
+        // master key from the MASTER password). masterKey stays null, so the
+        // `if (masterKey && result.keys)` persist block below is correctly
+        // skipped; the private key is not persisted at login. This matches the
+        // intended login/unlock separation and is not a regression.
         authPayload.password = password;
       }
 

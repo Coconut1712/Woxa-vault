@@ -168,7 +168,7 @@ export function BulkShareDialog({
                     }}
                     onFocus={() => setPickerOpen(true)}
                     placeholder={t("share.search_people")}
-                    className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                    className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50 rounded-sm"
                   />
                   {query && (
                     <button

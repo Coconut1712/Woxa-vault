@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "@/db/client";
-import { items, users, vaults, type Item } from "@/db/schema";
-import { queryValidator } from "@/lib/validator";
+import { itemSearchTerms, items, vaults, type Item } from "@/db/schema";
+import { jsonValidator } from "@/lib/validator";
 import {
   requireAuth,
   requireTwoFactorEnrolled,
@@ -15,31 +15,45 @@ import { rateLimit } from "@/lib/rateLimit";
 import { errors } from "@/lib/errors";
 
 // ---------------------------------------------------------------------------
-// US-017 / AC-017.2/.3/.5 · FR-041/042 — Cmd+K item search.
+// US-017 / AC-017.2/.3/.5 · FR-041/042/043 — Cmd+K item search.
 //
-// Phase A is SERVER-SIDE search over PLAINTEXT metadata only (name, username,
-// url, type). Secret fields (password/notes ciphertext + everything inside the
-// encrypted `__WOXA_META__` notes blob: tags, totp, card, etc.) are NEVER
-// searched — the server can't see them and decrypting every row to search
-// would be slow and would defeat the envelope-encryption model. Phase C will
-// replace this with a client-built blind index.
+// All vaults are zero-knowledge (encryption_version = 2), so search is a single
+// blind-index mode:
 //
-// RBAC: results are scoped to the caller's ACTIVE org and filtered to items the
-// caller can access at >= view_metadata via the SAME most-specific-wins engine
-// used by GET /vaults/:id/items (resolveItemRole → item override / folder grant
-// / vault membership / team grants, with temp-grant expiry). A null role means
-// no access → the item is omitted (anti-enumeration: never leaks existence of
-// items in other orgs or behind a permission the caller lacks).
+//   POST /search/blind — Phase C (encryption_version = 2, FR-043) vaults.
+//     The client derives a per-vault search key (HKDF of the vault key the
+//     server never sees), tokenizes its query the SAME way it tokenized items
+//     at write time (normalize → words + 3-grams), HMACs each token, and sends
+//     the opaque digests as `terms[]`. The server matches item_search_terms by
+//     hash equality, ranks by match count, and returns the item's CIPHERTEXT
+//     metadata (name/username/url) for the client to decrypt. The server never
+//     sees the query plaintext, the search key, or any metadata plaintext.
 //
-// Audit: search is read-only metadata browsing and runs on every keystroke, so
-// it is NOT audited per-query (would flood audit_events) and the query string
-// is NEVER logged (it may echo secret-adjacent text the user is hunting for).
-// Revealing a found item still goes through GET /items/:id(/password), which
-// audits as item.view / item.reveal.
+// RBAC: results are scoped to the caller's ACTIVE org and filtered
+// to items the caller can reach at >= view_metadata via the same most-specific-
+// wins batch resolver used by GET /vaults/:id/items. A null role → the item is
+// omitted (anti-enumeration: never leaks existence of items in other orgs or
+// behind a permission the caller lacks). Blind mode never reveals that a term
+// MATCHED an inaccessible item — those rows are dropped before the response is
+// shaped.
+//
+// Audit: search is read-only metadata browsing on every keystroke, so it is NOT
+// audited per-query (would flood audit_events). The HMAC tokens are NEVER logged
+// (opaque but still vault-correlatable). Revealing a found item still goes
+// through GET /items/:id(/password), which audits.
 // ---------------------------------------------------------------------------
 
-const searchSchema = z.object({
-  q: z.string().trim().min(1).max(200),
+// Blind-index token: base64 HMAC-SHA256 digest (32 bytes → 44 chars). Same wire
+// shape the write path (routes/items.ts) accepts for searchTerms.
+const zBlindToken = z
+  .string()
+  .length(44)
+  .regex(/^[A-Za-z0-9+/]{43}=$/, "term must be a base64 HMAC-SHA256 digest");
+
+const blindSearchSchema = z.object({
+  // The query's HMAC tokens. Capped to bound the IN(...) set. An empty array is
+  // rejected (min 1) — a blank search returns nothing client-side instead.
+  terms: z.array(zBlindToken).min(1).max(200),
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
 
@@ -54,9 +68,17 @@ interface SearchResult {
   vaultName: string;
   folderId: string | null;
   type: string;
+  // Always "" / null for ZK items (real value is in the *Ciphertext fields).
   name: string;
   username: string | null;
   url: string | null;
+  // ZK metadata (base64). Frontend decrypts with the vault key.
+  nameCiphertext: string | null;
+  nameIv: string | null;
+  usernameCiphertext: string | null;
+  usernameIv: string | null;
+  urlCiphertext: string | null;
+  urlIv: string | null;
   hasPassword: boolean;
   hasNotes: boolean;
   lastUsedAt: string | null;
@@ -64,20 +86,52 @@ interface SearchResult {
   effectiveRole: AccessRole;
 }
 
+// Shared RBAC filter: given org-scoped candidate rows, resolve the caller's
+// effective role per item (batched / auditor short-circuit) and emit only the
+// reachable ones, preserving candidate order, up to `limit`. Identical to the
+// original v1 logic so both modes leak nothing across org / permission lines.
+async function filterByAccess(
+  userId: string,
+  orgRole: string,
+  candidates: { item: Item; vaultName: string }[],
+  limit: number,
+): Promise<SearchResult[]> {
+  const results: SearchResult[] = [];
+  if (orgRole === "auditor") {
+    for (const row of candidates) {
+      if (results.length >= limit) break;
+      results.push(toResult(row.item, row.vaultName, "viewer"));
+    }
+    return results;
+  }
+  const roleMap = await resolveItemRolesBatch(
+    userId,
+    candidates.map((row) => ({
+      id: row.item.id,
+      vaultId: row.item.vaultId,
+      folderId: row.item.folderId,
+    })),
+  );
+  for (const row of candidates) {
+    if (results.length >= limit) break;
+    const role = roleMap.get(row.item.id) ?? null;
+    if (!role) continue; // no access at any level → omit (anti-enumeration)
+    results.push(toResult(row.item, row.vaultName, role));
+  }
+  return results;
+}
+
 export const searchRoutes = new Hono<{ Variables: AuthVariables }>()
   .use("*", requireAuth)
   .use("*", requireTwoFactorEnrolled)
 
-  // GET /search?q=&limit=
-  .get("/", queryValidator(searchSchema), async (c) => {
+  // POST /search/blind — Phase C (v2) zero-knowledge blind-index search (FR-043).
+  // Body: { terms: base64-HMAC[], limit }. The server matches opaque hashes; it
+  // never sees the query plaintext or the search key.
+  .post("/blind", jsonValidator(blindSearchSchema), async (c) => {
     const user = c.get("user")!;
-    const { q, limit } = c.req.valid("query");
+    const { terms, limit } = c.req.valid("json");
 
-    // Rate limit per user: search runs server-side over every keystroke and each
-    // call resolves up to CANDIDATE_CAP rows, so an authenticated client could
-    // otherwise hammer the DB (authenticated DoS). 120/min/user comfortably
-    // covers fast typing + debounced UIs while capping abuse. Keyed by user (not
-    // IP) so one tenant can't starve another behind a shared NAT.
     const rl = await rateLimit(`search:${user.id}`, { limit: 120, windowMs: 60_000 });
     if (!rl.allowed) {
       throw errors.rateLimited("Too many searches, slow down", Math.ceil(rl.resetMs / 1000));
@@ -87,74 +141,44 @@ export const searchRoutes = new Hono<{ Variables: AuthVariables }>()
     if (!activeOrg) return c.json({ results: [] });
     const { orgId, role: orgRole } = activeOrg;
 
-    // ILIKE pattern. Escape LIKE wildcards in user input so a query of "%" or
-    // "_" matches those literal characters rather than acting as a wildcard.
-    const escaped = q.replace(/([%_\\])/g, "\\$1");
-    const pattern = `%${escaped}%`;
+    const termHashes = terms.map((t) => Buffer.from(t, "base64"));
 
-    // Candidate fetch: org-scoped, live (not soft-deleted), text-matched on
-    // PLAINTEXT columns only, joined to the vault for the org filter + name.
-    // Ordered by AC-017.3 priority:
-    //   1. exact name match (case-insensitive) first
-    //   2. recently used (last_used_at desc, NULLs last)
-    //   3. alphabetical by name
-    const exactName = sql<boolean>`lower(${items.name}) = lower(${q})`;
-    const candidates = await db
-      .select({
-        item: items,
-        vaultName: vaults.name,
-        isExact: exactName,
-      })
-      .from(items)
+    // Match items whose blind-index set contains ANY of the query tokens, scoped
+    // to live v2 vaults in the active org. `matchCount` = how many distinct
+    // query tokens an item matched — used to rank (more tokens matched = more
+    // relevant, e.g. all words of a multi-word query). The DB sees only opaque
+    // hashes; it cannot tell name from username from a trigram.
+    const matchCount = sql<number>`count(distinct ${itemSearchTerms.termHash})`;
+    const matchRows = await db
+      .select({ item: items, vaultName: vaults.name, matches: matchCount })
+      .from(itemSearchTerms)
+      .innerJoin(items, eq(items.id, itemSearchTerms.itemId))
       .innerJoin(vaults, eq(vaults.id, items.vaultId))
       .where(
         and(
+          inArray(itemSearchTerms.termHash, termHashes),
           eq(vaults.orgId, orgId),
+          eq(vaults.encryptionVersion, 2),
           isNull(items.deletedAt),
           isNull(vaults.deletedAt),
-          or(
-            ilike(items.name, pattern),
-            ilike(items.username, pattern),
-            ilike(items.url, pattern),
-            ilike(items.type, pattern),
-          ),
         ),
       )
+      .groupBy(items.id, vaults.name)
+      // Rank: most query-tokens matched first, then recently used, then most
+      // recently updated (name is encrypted, so no alphabetical tiebreak).
       .orderBy(
-        desc(exactName),
+        desc(matchCount),
         sql`${items.lastUsedAt} desc nulls last`,
-        items.name,
+        desc(items.updatedAt),
       )
       .limit(CANDIDATE_CAP);
 
-    // Resolve the caller's EFFECTIVE role per candidate (most-specific-wins).
-    // Auditor is org-wide read-only → surfaces everything in the org as viewer
-    // without per-grant resolution (mirrors GET /vaults auditor branch). All
-    // other callers go through ONE batched resolution (bounded query count)
-    // rather than a per-row sequential resolveItemRole (the old N+1 / DoS path).
-    const results: SearchResult[] = [];
-    if (orgRole === "auditor") {
-      for (const row of candidates) {
-        if (results.length >= limit) break;
-        results.push(toResult(row.item, row.vaultName, "viewer"));
-      }
-    } else {
-      const roleMap = await resolveItemRolesBatch(
-        user.id,
-        candidates.map((row) => ({
-          id: row.item.id,
-          vaultId: row.item.vaultId,
-          folderId: row.item.folderId,
-        })),
-      );
-      for (const row of candidates) {
-        if (results.length >= limit) break;
-        const role = roleMap.get(row.item.id) ?? null;
-        if (!role) continue; // no access at any level → omit (anti-enumeration)
-        results.push(toResult(row.item, row.vaultName, role));
-      }
-    }
-
+    const results = await filterByAccess(
+      user.id,
+      orgRole,
+      matchRows.map((r) => ({ item: r.item, vaultName: r.vaultName })),
+      limit,
+    );
     return c.json({ results });
   });
 
@@ -168,6 +192,12 @@ function toResult(it: Item, vaultName: string, role: AccessRole): SearchResult {
     name: it.name,
     username: it.username,
     url: it.url,
+    nameCiphertext: it.nameCiphertext?.toString("base64") ?? null,
+    nameIv: it.nameIv?.toString("base64") ?? null,
+    usernameCiphertext: it.usernameCiphertext?.toString("base64") ?? null,
+    usernameIv: it.usernameIv?.toString("base64") ?? null,
+    urlCiphertext: it.urlCiphertext?.toString("base64") ?? null,
+    urlIv: it.urlIv?.toString("base64") ?? null,
     hasPassword: it.passwordCiphertext !== null,
     hasNotes: it.notesCiphertext !== null,
     lastUsedAt: it.lastUsedAt ? it.lastUsedAt.toISOString() : null,

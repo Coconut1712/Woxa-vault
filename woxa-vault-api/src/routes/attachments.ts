@@ -13,7 +13,7 @@ import {
 } from "@/db/schema";
 import { env } from "@/config/env";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import {
   decryptBytes,
@@ -369,7 +369,7 @@ export const itemAttachmentRoutes = new Hono<{ Variables: AuthVariables }>()
         targetId: created.id,
         // Filename can leak secrets — log a stable length + mime instead.
         targetName: null,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: {
@@ -433,7 +433,7 @@ export const attachmentRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "attachment",
         targetId: access.attachment.id,
         targetName: null,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: {
@@ -494,7 +494,7 @@ export const attachmentRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "attachment",
         targetId: access.attachment.id,
         targetName: null,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: {

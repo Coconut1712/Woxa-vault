@@ -45,6 +45,10 @@ import { useT } from "@/lib/i18n/provider";
 import { useVaults } from "@/lib/vaults/provider";
 import { useFolders } from "@/lib/folders/provider";
 import { createDisplayItem } from "@/lib/items-overlay";
+import {
+  RotationPolicyField,
+  parseRotationDays,
+} from "@/components/vault/rotation-badge";
 import { useVaultLock } from "@/components/vault-lock/lock-provider";
 import { ApiError } from "@/lib/api/client";
 import type {
@@ -112,6 +116,9 @@ export function NewItemDialog({
   const [tagsText, setTagsText] = useState("");
   const [favorite, setFavorite] = useState(false);
 
+  // US-060 — per-item rotation window (days). Empty = inherit org default.
+  const [rotationDays, setRotationDays] = useState("");
+
   // Custom fields
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
 
@@ -144,6 +151,7 @@ export function NewItemDialog({
         setTotpSecret("");
         setTagsText("");
         setFavorite(false);
+        setRotationDays("");
         setCustomFields([]);
         setCard({});
         setIdentity({});
@@ -188,6 +196,7 @@ export function NewItemDialog({
         tags,
         favorite,
         totpSecret: totpSecret.trim() || null,
+        rotationPolicyDays: parseRotationDays(rotationDays),
         customFields,
         card: kind === "card" ? card : undefined,
         identity: kind === "identity" ? identity : undefined,
@@ -434,6 +443,8 @@ export function NewItemDialog({
                       className="font-mono-secret text-sm"
                     />
                   </FormField>
+
+                  <RotationPolicyField value={rotationDays} onChange={setRotationDays} />
                 </div>
               )}
 
@@ -453,6 +464,7 @@ export function NewItemDialog({
                       showStrength={false}
                     />
                   </FormField>
+                  <RotationPolicyField value={rotationDays} onChange={setRotationDays} />
                 </div>
               )}
 
@@ -488,6 +500,7 @@ export function NewItemDialog({
                       className="font-mono-secret text-sm"
                     />
                   </FormField>
+                  <RotationPolicyField value={rotationDays} onChange={setRotationDays} />
                 </div>
               )}
 
@@ -519,7 +532,7 @@ export function NewItemDialog({
                         onChange={(e) =>
                           setCard((p) => ({ ...p, expiry: e.target.value }))
                         }
-                        placeholder="MM/YY"
+                        placeholder={tr("item.card.expiry_placeholder")}
                         className="font-mono-secret text-sm"
                       />
                     </FormField>

@@ -610,6 +610,8 @@ export const translations: Dict = {
   "sends.status.burned": { en: "Burned", th: "ถูกทำลาย" },
   "sends.status.expired": { en: "Expired", th: "หมดอายุ" },
   "sends.action.burn_now": { en: "Burn now", th: "ทำลายทันที" },
+  "sends.burn.title": { en: "Burn this send?", th: "ทำลาย send นี้?" },
+  "sends.burn.desc": { en: "The link will stop working immediately and cannot be recovered.", th: "ลิงก์จะหยุดใช้งานทันทีและไม่สามารถกู้คืนได้" },
   "sends.copy": { en: "Copy", th: "คัดลอก" },
   "sends.link_copied": {
     en: "Link copied to clipboard",
@@ -628,6 +630,14 @@ export const translations: Dict = {
   "send_new.sending_from": {
     en: "Sending from {name}. The vault item itself is not modified.",
     th: "ส่งจาก {name} รายการในตู้นิรภัยไม่ถูกแก้ไข",
+  },
+  "send_new.vault_locked": {
+    en: "Unlock the vault to create a send",
+    th: "ปลดล็อก Vault เพื่อสร้างลิงก์ส่ง",
+  },
+  "send_new.vault_locked_desc": {
+    en: "This vault is zero-knowledge — unlock it first so the item's fields can be decrypted.",
+    th: "Vault นี้เป็น Zero-Knowledge ปลดล็อกก่อนจึงจะถอดรหัสฟิลด์ของรายการได้",
   },
   "send_new.secret_content": { en: "Secret content", th: "เนื้อหาที่จะส่ง" },
   "send_new.placeholder_content": {
@@ -743,6 +753,7 @@ export const translations: Dict = {
   "members.col.2fa": { en: "2FA", th: "2FA" },
   "members.col.vaults": { en: "Vaults", th: "ตู้นิรภัย" },
   "members.col.last_active": { en: "Last active", th: "ใช้งานล่าสุด" },
+  "members.status.never_joined": { en: "Never logged in", th: "ยังไม่เคยเข้า" },
   "members.stat.total": { en: "Total members", th: "สมาชิกทั้งหมด" },
   "members.stat.admins": { en: "Admins", th: "แอดมิน" },
   "members.stat.2fa": { en: "2FA enabled", th: "เปิดใช้ 2FA" },
@@ -880,6 +891,7 @@ export const translations: Dict = {
 
   /* ---- trash ---- */
   "trash.title": { en: "Trash", th: "ถังขยะ" },
+  "trash.encrypted_item": { en: "Encrypted item", th: "รายการที่เข้ารหัส" },
   "trash.subtitle": {
     en: "Deleted items are kept for 30 days before being permanently removed",
     th: "รายการที่ลบจะถูกเก็บไว้ 30 วันก่อนลบถาวร",
@@ -1008,6 +1020,10 @@ export const translations: Dict = {
   "audit.filter.action": { en: "Action type", th: "ประเภทการกระทำ" },
   "audit.filter.all_actions": { en: "All actions", th: "ทุกการกระทำ" },
   "audit.filter.actor": { en: "Actor", th: "ผู้กระทำ" },
+  "audit.filter.no_actors": {
+    en: "Load events to see actors",
+    th: "โหลดข้อมูลเพื่อดูรายชื่อ",
+  },
   /* audit filter — action group headers */
   "audit.group.item": { en: "Items", th: "รายการ" },
   "audit.group.folder": { en: "Folders", th: "โฟลเดอร์" },
@@ -1026,6 +1042,27 @@ export const translations: Dict = {
     en: "{n} of {m} events",
     th: "{n} จาก {m} เหตุการณ์",
   },
+  "audit.events_count_short": {
+    en: "{n} / {m}",
+    th: "{n} / {m}",
+  },
+  "audit.events_unit": { en: "events", th: "เหตุการณ์" },
+  "audit.showing_range": {
+    en: "Showing {start}–{end} of {total}",
+    th: "แสดง {start}–{end} จาก {total}",
+  },
+  "audit.total_events": {
+    en: "{total} events",
+    th: "{total} เหตุการณ์",
+  },
+  "audit.per_page": { en: "Per page", th: "ต่อหน้า" },
+  "audit.page_of": {
+    en: "Page {page} of {total}",
+    th: "หน้า {page} จาก {total}",
+  },
+  "audit.prev": { en: "Previous", th: "ก่อนหน้า" },
+  "audit.next": { en: "Next", th: "ถัดไป" },
+  "audit.applied_filters": { en: "Applied filters", th: "ตัวกรองที่ใช้" },
   /* audit actions — 2FA */
   "audit.action.2fa_enabled": { en: "Enabled 2FA", th: "เปิดใช้ 2FA" },
   "audit.action.2fa_disabled": { en: "Disabled 2FA", th: "ปิดใช้ 2FA" },
@@ -2449,6 +2486,8 @@ export const translations: Dict = {
     th: "{n} โฟลเดอร์เริ่มต้น · {mode}",
   },
   "nv.encryption": { en: "Encryption", th: "การเข้ารหัส" },
+  "nv.error.no_master_password": { en: "Master password required", th: "ต้องตั้งค่า Master password ก่อน" },
+  "nv.error.no_master_password_desc": { en: "Set up your master password in Settings → Security before creating a vault.", th: "ตั้งค่า Master password ใน Settings → Security ก่อนสร้าง vault" },
   "nv.zk": { en: "Zero-knowledge", th: "Zero-knowledge" },
   "nv.zk_badge": { en: "Recommended", th: "แนะนำ" },
   "nv.zk_desc": {
@@ -2570,6 +2609,11 @@ export const translations: Dict = {
     en: "Your one-time send was opened · {n} views left",
     th: "ลิงก์ส่งครั้งเดียวของคุณถูกเปิด · เหลือดูได้อีก {n} ครั้ง",
   },
+  "notif.vault_rekey_pending.title": { en: "Vault re-key needed", th: "Vault ต้องการ re-key" },
+  "notif.vault_rekey_pending.body": {
+    en: "{actor} removed a member · please re-key \"{target}\" to rotate the vault key",
+    th: "{actor} ลบสมาชิก · กรุณา re-key vault \"{target}\" เพื่อหมุนเวียน key",
+  },
   "notif.tab.all": { en: "All", th: "ทั้งหมด" },
   "notif.tab.unread": { en: "Unread", th: "ยังไม่อ่าน" },
   "notif.empty.all": { en: "No notifications", th: "ไม่มีการแจ้งเตือน" },
@@ -2665,6 +2709,10 @@ export const translations: Dict = {
   "cmd.n_items": { en: "{n} items", th: "{n} รายการ" },
   "cmd.searching": { en: "Searching…", th: "กำลังค้นหา…" },
   "cmd.no_items": { en: "No matching items.", th: "ไม่พบรายการที่ตรงกัน" },
+  "cmd.locked_zk_hint": {
+    en: "Some encrypted vaults are locked — unlock to include them in search.",
+    th: "ห้องนิรภัยที่เข้ารหัสบางรายการถูกล็อกอยู่ — ปลดล็อกเพื่อให้ค้นหาเจอ",
+  },
 
   /* ---- recipient page ---- */
   "recip.someone_shared": {
@@ -5176,6 +5224,335 @@ export const translations: Dict = {
   "item.password_never_changed": {
     en: "Password has never been changed",
     th: "ยังไม่เคยเปลี่ยนรหัสผ่าน",
+  },
+
+  /* --- US-060 password rotation --- */
+  "rotation.status.fresh": {
+    en: "Rotation OK",
+    th: "หมุนเวียนปกติ",
+  },
+  "rotation.status.due": {
+    en: "Rotation due",
+    th: "ใกล้ครบกำหนดหมุนเวียน",
+  },
+  "rotation.status.overdue": {
+    en: "Rotation overdue",
+    th: "เกินกำหนดหมุนเวียน",
+  },
+  "rotation.badge_with_date": {
+    en: "{label} · {when}",
+    th: "{label} · {when}",
+  },
+  "rotation.dot_aria": {
+    en: "{label} (due {when})",
+    th: "{label} (ครบกำหนด {when})",
+  },
+  "rotation.policy.label": {
+    en: "Rotation policy",
+    th: "นโยบายหมุนเวียนรหัสผ่าน",
+  },
+  "rotation.policy.hint": {
+    en: "Remind to rotate the password every N days. Leave empty to use the workspace default.",
+    th: "เตือนให้เปลี่ยนรหัสผ่านทุก N วัน เว้นว่างไว้เพื่อใช้ค่าเริ่มต้นของ Workspace",
+  },
+  "rotation.policy.placeholder": {
+    en: "e.g. 90 (inherit default)",
+    th: "เช่น 90 (ใช้ค่าเริ่มต้น)",
+  },
+  "rotation.policy.unit": {
+    en: "days",
+    th: "วัน",
+  },
+  "rotation.org_default.title": {
+    en: "Default rotation reminder",
+    th: "ค่าเริ่มต้นการเตือนหมุนเวียนรหัสผ่าน",
+  },
+  "rotation.org_default.desc": {
+    en: "Remind members to rotate passwords every N days unless an item sets its own policy. Empty = no default.",
+    th: "เตือนสมาชิกให้เปลี่ยนรหัสผ่านทุก N วัน เว้นแต่รายการจะตั้งนโยบายของตัวเอง เว้นว่าง = ไม่มีค่าเริ่มต้น",
+  },
+  "rotation.org_default.placeholder": {
+    en: "No default",
+    th: "ไม่มีค่าเริ่มต้น",
+  },
+  "rotation.org_default.toast_saved": {
+    en: "Rotation default updated",
+    th: "อัปเดตค่าเริ่มต้นการหมุนเวียนแล้ว",
+  },
+  "rotation.widget.title": {
+    en: "Secrets need rotation",
+    th: "รหัสที่ต้องหมุนเวียน",
+  },
+  "rotation.widget.summary": {
+    en: "{n} secrets need rotation",
+    th: "มี {n} รายการที่ต้องหมุนเวียน",
+  },
+  "rotation.widget.overdue": {
+    en: "{n} overdue",
+    th: "เกินกำหนด {n}",
+  },
+  "rotation.widget.due": {
+    en: "{n} due soon",
+    th: "ใกล้ครบกำหนด {n}",
+  },
+  "rotation.widget.all_good": {
+    en: "All secrets are up to date",
+    th: "ทุกรายการเป็นปัจจุบัน",
+  },
+  "rotation.widget.view": {
+    en: "Review",
+    th: "ตรวจสอบ",
+  },
+
+  /* --- Phase C migrate (v1 → v2) --- */
+  "migrate.banner_title": {
+    en: "Upgrade to Zero-Knowledge",
+    th: "อัปเกรดเป็น Zero-Knowledge",
+  },
+  "migrate.banner_desc": {
+    en: "Re-encrypt this vault so the server can never read its secrets. Reversible for 30 days.",
+    th: "เข้ารหัส Vault นี้ใหม่เพื่อให้เซิร์ฟเวอร์อ่านความลับไม่ได้ ย้อนกลับได้ภายใน 30 วัน",
+  },
+  "migrate.banner_cta": {
+    en: "Upgrade to Zero-Knowledge",
+    th: "อัปเกรดเป็น Zero-Knowledge",
+  },
+  "migrate.title": {
+    en: "Upgrade to Zero-Knowledge",
+    th: "อัปเกรดเป็น Zero-Knowledge",
+  },
+  "migrate.desc": {
+    en: "“{name}” will be re-encrypted client-side. After this, only members with a key can read it.",
+    th: "“{name}” จะถูกเข้ารหัสใหม่ที่ฝั่งไคลเอนต์ หลังจากนี้เฉพาะสมาชิกที่มีคีย์เท่านั้นที่อ่านได้",
+  },
+  "migrate.rollback_note": {
+    en: "You can roll back to the previous encryption within 30 days.",
+    th: "คุณสามารถย้อนกลับไปการเข้ารหัสเดิมได้ภายใน 30 วัน",
+  },
+  "migrate.confirm": {
+    en: "Upgrade now",
+    th: "อัปเกรดเลย",
+  },
+  "migrate.toast_done": {
+    en: "Vault upgraded to Zero-Knowledge",
+    th: "อัปเกรด Vault เป็น Zero-Knowledge แล้ว",
+  },
+  "migrate.toast_done_desc": {
+    en: "“{name}” · {n} items re-encrypted",
+    th: "“{name}” · เข้ารหัสใหม่ {n} รายการ",
+  },
+  "migrate.error_title": {
+    en: "Upgrade failed",
+    th: "อัปเกรดไม่สำเร็จ",
+  },
+  "migrate.error_not_v1": {
+    en: "This vault is already zero-knowledge.",
+    th: "Vault นี้เป็น Zero-Knowledge อยู่แล้ว",
+  },
+  "migrate.migrated_title": {
+    en: "Zero-Knowledge enabled",
+    th: "เปิดใช้ Zero-Knowledge แล้ว",
+  },
+  "migrate.rollback_until": {
+    en: "You can roll back until {when}.",
+    th: "ย้อนกลับได้จนถึง {when}",
+  },
+  "migrate.rollback_cta": {
+    en: "Roll back",
+    th: "ย้อนกลับ",
+  },
+  "migrate.rollback_confirm_title": {
+    en: "Roll back to server-side encryption?",
+    th: "ย้อนกลับไปการเข้ารหัสฝั่งเซิร์ฟเวอร์?",
+  },
+  "migrate.rollback_confirm_desc": {
+    en: "“{name}” will return to its previous encryption. This cannot be undone.",
+    th: "“{name}” จะกลับไปใช้การเข้ารหัสเดิม การกระทำนี้ย้อนกลับไม่ได้",
+  },
+  "migrate.rollback_toast": {
+    en: "Vault rolled back",
+    th: "ย้อนกลับ Vault แล้ว",
+  },
+  "migrate.rollback_error": {
+    en: "Rollback failed",
+    th: "ย้อนกลับไม่สำเร็จ",
+  },
+  "migrate.rollback_unavailable": {
+    en: "No backup is available — the rollback window has elapsed.",
+    th: "ไม่มีข้อมูลสำรอง — หมดช่วงเวลาย้อนกลับแล้ว",
+  },
+
+  /* --- Phase C re-key (v2 rotation) --- */
+  "rekey.banner_title": {
+    en: "Re-key needed",
+    th: "ต้องหมุนคีย์ใหม่",
+  },
+  "rekey.banner_desc": {
+    en: "A member was removed. Rotate the vault key so their cached key can no longer read items.",
+    th: "มีสมาชิกถูกถอดออก หมุนคีย์ Vault ใหม่เพื่อไม่ให้คีย์ที่แคชไว้อ่านรายการได้อีก",
+  },
+  "rekey.banner_cta": {
+    en: "Rotate vault key",
+    th: "หมุนคีย์ Vault",
+  },
+  "rekey.title": {
+    en: "Rotate vault key",
+    th: "หมุนคีย์ Vault",
+  },
+  "rekey.desc": {
+    en: "Generate a new key for “{name}” and re-encrypt every item under it.",
+    th: "สร้างคีย์ใหม่สำหรับ “{name}” และเข้ารหัสทุกรายการใหม่ด้วยคีย์นั้น",
+  },
+  "rekey.locked_hint": {
+    en: "This vault is locked. Unlock it first so the current items can be re-encrypted.",
+    th: "Vault นี้ถูกล็อกอยู่ ปลดล็อกก่อนเพื่อให้เข้ารหัสรายการปัจจุบันใหม่ได้",
+  },
+  "rekey.loading_members": {
+    en: "Loading member keys…",
+    th: "กำลังโหลดคีย์สมาชิก…",
+  },
+  "rekey.members_load_error": {
+    en: "Could not load member keys.",
+    th: "โหลดคีย์สมาชิกไม่สำเร็จ",
+  },
+  "rekey.member_summary": {
+    en: "The new key will be shared with {n} enrolled members.",
+    th: "คีย์ใหม่จะถูกแชร์ให้สมาชิกที่ลงทะเบียนแล้ว {n} คน",
+  },
+  "rekey.skipped_warning": {
+    en: "{n} members have not set up zero-knowledge and will LOSE access:",
+    th: "สมาชิก {n} คนยังไม่ได้ตั้งค่า Zero-Knowledge และจะเข้าถึงไม่ได้:",
+  },
+  "rekey.skipped_ack": {
+    en: "I understand these members will lose access",
+    th: "ฉันเข้าใจว่าสมาชิกเหล่านี้จะเข้าถึงไม่ได้",
+  },
+  "rekey.confirm": {
+    en: "Rotate now",
+    th: "หมุนคีย์เลย",
+  },
+  "rekey.toast_done": {
+    en: "Vault key rotated",
+    th: "หมุนคีย์ Vault แล้ว",
+  },
+  "rekey.toast_done_desc": {
+    en: "“{name}” · {n} items re-encrypted",
+    th: "“{name}” · เข้ารหัสใหม่ {n} รายการ",
+  },
+  "rekey.error_title": {
+    en: "Re-key failed",
+    th: "หมุนคีย์ไม่สำเร็จ",
+  },
+  "rekey.error_conflict": {
+    en: "The vault key changed while you were working. Reloaded — please try again.",
+    th: "คีย์ Vault เปลี่ยนระหว่างที่คุณทำงาน โหลดใหม่แล้ว โปรดลองอีกครั้ง",
+  },
+  "rekey.error_not_zk": {
+    en: "Re-key only applies to zero-knowledge vaults.",
+    th: "การหมุนคีย์ใช้ได้กับ Vault แบบ Zero-Knowledge เท่านั้น",
+  },
+  "rekey.error_forbidden": {
+    en: "You don't have permission to rotate this vault's key.",
+    th: "คุณไม่มีสิทธิ์หมุนคีย์ของ Vault นี้",
+  },
+
+  "item.edit_dialog.vault_locked": { en: "Vault is locked", th: "Vault ถูกล็อกอยู่" },
+  "item.edit_dialog.vault_locked_desc": {
+    en: "Unlock the vault first — your changes cannot be encrypted without the vault key.",
+    th: "ปลดล็อก Vault ก่อน — ไม่สามารถเข้ารหัสการเปลี่ยนแปลงได้โดยไม่มี vault key",
+  },
+  "item.favorite_locked": {
+    en: "Unlock the vault to save favorites",
+    th: "ปลดล็อก Vault เพื่อบันทึกรายการโปรด",
+  },
+  "item.favorite_locked_desc": {
+    en: "This vault is zero-knowledge — unlock it first to change favorites.",
+    th: "Vault นี้เป็น Zero-Knowledge ปลดล็อกก่อนจึงจะเปลี่ยนรายการโปรดได้",
+  },
+
+  "common.previous": { en: "Previous", th: "ก่อนหน้า" },
+
+  "folder.reorder_aria": {
+    en: "Drag to reorder {name}",
+    th: "ลากเพื่อจัดลำดับ {name}",
+  },
+
+  "activity.tab": { en: "My Activity", th: "กิจกรรมของฉัน" },
+  "activity.empty": { en: "No recent activity", th: "ไม่มีกิจกรรมล่าสุด" },
+  "activity.unrecognized": { en: "Unrecognized?", th: "ไม่รู้จัก?" },
+  "activity.loading": { en: "Loading activity...", th: "กำลังโหลดกิจกรรม..." },
+  "activity.section_title": {
+    en: "My Activity",
+    th: "กิจกรรมของฉัน",
+  },
+  "activity.section_desc": {
+    en: "Your account activity over the last 90 days. Spot anything you don't recognize and secure your account.",
+    th: "กิจกรรมบัญชีของคุณในช่วง 90 วันที่ผ่านมา หากพบสิ่งที่ไม่รู้จัก ให้รีบรักษาความปลอดภัยบัญชีของคุณ",
+  },
+  "activity.success": { en: "Success", th: "สำเร็จ" },
+  "activity.failed": { en: "Failed", th: "ล้มเหลว" },
+  "activity.page_of": { en: "Page {page} of {total}", th: "หน้า {page} จาก {total}" },
+  "activity.load_failed": {
+    en: "Couldn't load your activity",
+    th: "โหลดกิจกรรมของคุณไม่สำเร็จ",
+  },
+  "activity.empty_desc": {
+    en: "Account events from the last 90 days will appear here.",
+    th: "เหตุการณ์ของบัญชีในช่วง 90 วันที่ผ่านมาจะแสดงที่นี่",
+  },
+  "common.inactive": { en: "Inactive", th: "ไม่ได้ใช้งาน" },
+  "common.select_all": { en: "Select all", th: "เลือกทั้งหมด" },
+  "item.card.expiry_placeholder": { en: "MM/YY", th: "ดด/ปป" },
+  "members.invite.email_placeholder": {
+    en: "name@example.com",
+    th: "name@example.com",
+  },
+  "members.stat.my_role": { en: "Your role", th: "บทบาทของคุณ" },
+  "requests.duration.days": { en: "{n}d", th: "{n}ว" },
+  "requests.duration.hours": { en: "{n}h", th: "{n}ช" },
+  "requests.duration.minutes": { en: "{n}m", th: "{n}น" },
+
+  "members.remove.title": {
+    en: "Remove member?",
+    th: "นำสมาชิกออก?",
+  },
+  "members.remove.desc": {
+    en: "{name} will lose access to this workspace. This cannot be undone.",
+    th: "{name} จะไม่สามารถเข้าถึง workspace นี้ได้อีก การกระทำนี้ไม่สามารถย้อนกลับได้",
+  },
+
+  "teams.delete.title": {
+    en: "Delete team “{name}”?",
+    th: "ลบทีม “{name}”?",
+  },
+  "teams.delete.desc": {
+    en: "This action cannot be undone. All members will be removed from this team.",
+    th: "การกระทำนี้ไม่สามารถย้อนกลับได้ สมาชิกทั้งหมดจะถูกนำออกจากทีมนี้",
+  },
+
+  "delete_confirm.password_label": {
+    en: "Master password",
+    th: "Master password",
+  },
+  "delete_confirm.password_placeholder": {
+    en: "Enter your master password",
+    th: "กรอก Master password",
+  },
+  "delete_confirm.wrong_password": {
+    en: "Incorrect password",
+    th: "รหัสผ่านไม่ถูกต้อง",
+  },
+  "delete_confirm.no_password": {
+    en: "Please set up a master password first",
+    th: "กรุณาตั้งค่า Master password ก่อน",
+  },
+  "delete_confirm.rate_limited": {
+    en: "Too many attempts, retry in {n}s",
+    th: "ลองใหม่ใน {n} วินาที",
+  },
+  "delete_confirm.hint": {
+    en: "This action cannot be undone.",
+    th: "การกระทำนี้ไม่สามารถย้อนกลับได้",
   },
 
 };

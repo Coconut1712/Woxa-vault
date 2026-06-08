@@ -7,7 +7,7 @@ import { env } from "@/config/env";
 import { db } from "@/db/client";
 import { auditEvents, userKeys, userMfaBackupCodes, users } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { hashIp, maskIp, clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { logger } from "@/lib/logger";
 import { sendTwoFactorChangedEmail } from "@/lib/mailer/resend";
@@ -165,7 +165,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
   // ------------------------------------------------------------------
   .post("/enroll", async (c) => {
     const user = c.get("user")!;
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     if (user.totpEnabledAt) {
@@ -212,6 +212,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
       });
@@ -230,7 +231,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
   .post("/verify-enroll", jsonValidator(verifyEnrollSchema), async (c) => {
     const user = c.get("user")!;
     const { code } = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     // Rate limit: 10 wrong codes per minute. Soft cap ticks every call,
@@ -269,6 +270,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: false,
         metadata: { stage: "verify_enroll", reason: totpResult === "replay" ? "replay" : "invalid_code" },
@@ -304,6 +306,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
       });
@@ -322,7 +325,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
   .post("/disable", jsonValidator(disableSchema), async (c) => {
     const user = c.get("user")!;
     const { password, code } = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     // F-01: fail-counting rate limit. We peek before doing any expensive work
@@ -352,6 +355,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: false,
         metadata: { stage: "disable_password" },
@@ -410,6 +414,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "user",
           targetId: user.id,
           ipHash,
+          ipMasked,
           userAgent,
           success: false,
           metadata: { stage: "disable_code" },
@@ -431,6 +436,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
       });
@@ -463,7 +469,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
   .post("/regenerate-backup-codes", jsonValidator(regenerateSchema), async (c) => {
     const user = c.get("user")!;
     const { password, code } = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     // F-02: fail-counting rate limit. Tighter cap than /disable because
@@ -500,6 +506,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: false,
         metadata: { stage: "regenerate", reason: "password" },
@@ -521,6 +528,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: false,
         metadata: { stage: "regenerate", reason: regenTotp === "replay" ? "replay" : "totp" },
@@ -542,6 +550,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
       });
@@ -559,6 +568,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
     const { mfaToken: bodyToken, code, useBackupCode } = c.req.valid("json");
     const ip = getClientIp(c);
     const ipHash = hashIp(ip);
+    const ipMasked = maskIp(ip);
     const userAgent = c.req.header("user-agent") ?? null;
 
     // Resolve the mfaToken: body first (password flow — backward compatible),
@@ -607,6 +617,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "user",
           targetId: null,
           ipHash,
+          ipMasked,
           userAgent,
           success: false,
           metadata: { reason: "bad_token", stage: "verify_login", source: tokenFromCookie ? "cookie" : "body" },
@@ -649,6 +660,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "user",
           targetId: user.id,
           ipHash,
+          ipMasked,
           userAgent,
           success: false,
           metadata: { reason, useBackupCode: !!useBackupCode },
@@ -756,6 +768,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "session",
           targetId: session.id,
           ipHash,
+          ipMasked,
           userAgent,
           success: true,
         });
@@ -767,6 +780,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "session",
         targetId: session.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
         metadata: { usedBackupCode, mfaSatisfied: true },
@@ -780,6 +794,7 @@ export const twoFactorRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "session",
         targetId: session.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
         metadata: { mfaUsed: true, phase: user.authKeyHash ? "C" : "A" },

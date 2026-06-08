@@ -17,12 +17,13 @@ import {
   invalidateSessionToken,
 } from "@/lib/session";
 import { rateLimit } from "@/lib/rateLimit";
-import { hashIp } from "@/lib/ipHash";
+import { hashIp, maskIp, clientIpAuditFields } from "@/lib/ipHash";
 import { logger } from "@/lib/logger";
 import { errors } from "@/lib/errors";
 import { getClientIp } from "@/lib/clientIp";
 import { normalizeRecoveryCode, splitAndValidateChecksum } from "@/lib/recoveryKit";
 import { isUniqueViolation } from "@/lib/pgError";
+import { fakeKdfSaltForEmail, generateKdfSalt } from "@/lib/kdfSalt";
 import type { AuthVariables } from "@/middleware/auth";
 import { requireAuth } from "@/middleware/auth";
 import { getCookie } from "hono/cookie";
@@ -80,8 +81,77 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
       userId: user.id,
       kdf: "argon2id",
       kdfParams: { iterations: 3, memorySize: 65536, parallelism: 4 },
+      // `requiresZk` describes the VAULT-UNLOCK master factor (legacy
+      // auth_key_hash present) — the lock screen consumes it to choose the
+      // verify-password payload shape (ZK vs plaintext-master). It must NOT
+      // drive LOGIN factor selection: an account can have BOTH a login password
+      // and a legacy auth_key_hash, in which case login must authenticate
+      // against `login_password_hash`, not derive a ZK hash from the typed
+      // login password (which would never match the master-derived auth key).
       requiresZk: user.authKeyHash !== null,
+      // `hasLoginPassword` is the LOGIN factor signal: when true, the client
+      // sends the plaintext login password (checked server-side against
+      // `login_password_hash`). This is the normal sign-in path and is
+      // independent of `requiresZk`.
+      hasLoginPassword: user.loginPasswordHash !== null,
     });
+  })
+
+  // ------------------------------------------------------------------
+  // GET /auth/kdf-salt?email= — pre-auth per-user KDF salt lookup
+  // ------------------------------------------------------------------
+  //
+  // Threat model:
+  //   Asset: the per-user Argon2id salt the client needs to derive the master
+  //     key. The salt is NOT secret — knowing it does not help derive the key
+  //     without the master password. The only sensitive signal here is the
+  //     EXISTENCE of an account for a given email.
+  //   Adversaries:
+  //     * Email-enumeration probe: hits this endpoint to learn which emails
+  //       have accounts (or have set up ZK). Mitigated by returning a
+  //       DETERMINISTIC decoy salt (HMAC over the email) for unknown / no-salt
+  //       accounts — same response shape + same value on every probe, so the
+  //       attacker cannot distinguish real from decoy or watch the value change.
+  //     * Brute-force / cost-burn: same rate limit as /auth/login (5/IP +
+  //       5/IP+email per 15 min) so this can't be used as a cheaper oracle.
+  //   Mitigations:
+  //     * Constant response shape `{ kdfSalt }` for hit AND miss.
+  //     * Decoy salt is deterministic per email (HMAC), never reveals existence,
+  //       and is never usable to derive a real key.
+  //     * `Cache-Control: no-store` so the per-email value isn't cached.
+  //   Residual risk:
+  //     * A real account whose `kdf_salt` somehow never got backfilled would be
+  //       served a decoy and fail to unlock — migration 0030 backfills every
+  //       existing row, and all creation sites populate it, so this is N/A.
+  .get("/kdf-salt", async (c) => {
+    const rawEmail = c.req.query("email")?.trim().toLowerCase();
+    if (!rawEmail) throw errors.invalidCredentials();
+
+    const ip = getClientIp(c);
+    const ipLimit = await rateLimit(`kdf-salt:ip:${ip}`, {
+      limit: LOGIN_LIMIT,
+      windowMs: LOGIN_WINDOW_MS,
+    });
+    const comboLimit = await rateLimit(`kdf-salt:${ip}:${rawEmail}`, {
+      limit: LOGIN_LIMIT,
+      windowMs: LOGIN_WINDOW_MS,
+    });
+    if (!ipLimit.allowed || !comboLimit.allowed) {
+      const retry = Math.ceil(Math.max(ipLimit.resetMs, comboLimit.resetMs) / 1000);
+      c.header("Retry-After", String(retry));
+      throw errors.rateLimited("Too many requests. Please try again later.", retry);
+    }
+
+    c.header("Cache-Control", "no-store");
+
+    const user = await db.query.users.findFirst({
+      where: sql`lower(${users.email}) = ${rawEmail}`,
+      columns: { kdfSalt: true },
+    });
+
+    // Real salt when present; deterministic decoy otherwise (anti-enumeration).
+    const kdfSalt = user?.kdfSalt ?? fakeKdfSaltForEmail(rawEmail);
+    return c.json({ kdfSalt });
   })
 
   .post("/login", jsonValidator(loginSchema), async (c) => {
@@ -91,6 +161,8 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
     // honoring `X-Forwarded-For` only when `TRUST_PROXY=true`. See clientIp.ts.
     const ip = getClientIp(c);
     const ipHash = hashIp(ip);
+
+    const ipMasked = maskIp(ip);
 
     // Rate limit both by IP and by IP+email to defeat email-enum + brute force.
     const ipLimit = await rateLimit(`login:ip:${ip}`, { limit: LOGIN_LIMIT, windowMs: LOGIN_WINDOW_MS });
@@ -125,6 +197,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
         actorUserId: user?.id ?? null,
         actorEmail: email,
         ipHash,
+        ipMasked,
         userAgent: c.req.header("user-agent") ?? null,
         success: false,
         metadata: { 
@@ -163,6 +236,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
         actorUserId: user.id,
         actorEmail: user.email,
         ipHash,
+        ipMasked,
         userAgent: c.req.header("user-agent") ?? null,
         success: false,
         metadata: { failedCount: failed },
@@ -195,6 +269,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
         actorUserId: user.id,
         actorEmail: user.email,
         ipHash,
+        ipMasked,
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
       });
@@ -218,6 +293,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "session",
       targetId: session.id,
       ipHash,
+      ipMasked,
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
     });
@@ -275,6 +351,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
     const { email, password, displayName } = c.req.valid("json");
     const ip = getClientIp(c);
     const ipHash = hashIp(ip);
+    const ipMasked = maskIp(ip);
     const userAgent = c.req.header("user-agent") ?? null;
 
     const limit = await rateLimit(`register:ip:${ip}`, {
@@ -296,6 +373,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
         action: "auth.register.failed",
         actorEmail: email,
         ipHash,
+        ipMasked,
         userAgent,
         success: false,
         metadata: { reason: "email_taken" },
@@ -315,6 +393,9 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
           loginPasswordHash,
           // master not set → requiresPasswordSetup=true downstream
           passwordHash: null,
+          // Per-user KDF salt (Phase C fix #2) — random, server-stored, handed
+          // to the client at unlock/setup so it can derive the master key.
+          kdfSalt: generateKdfSalt(),
           displayName: displayName ?? null,
           name: displayName ?? null,
           status: "active",
@@ -332,6 +413,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
           action: "auth.register.failed",
           actorEmail: email,
           ipHash,
+          ipMasked,
           userAgent,
           success: false,
           metadata: { reason: "email_taken_race" },
@@ -355,6 +437,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "user",
       targetId: newUser.id,
       ipHash,
+      ipMasked,
       userAgent,
       success: true,
       metadata: { method: "email_password" },
@@ -440,6 +523,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
 
       const ip = getClientIp(c);
       const ipHash = hashIp(ip);
+      const ipMasked = maskIp(ip);
       const userAgent = c.req.header("user-agent") ?? null;
 
       // Aggressive rate limiting — recovery is a high-value target. We key on
@@ -516,6 +600,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "user",
           targetId: user?.id ?? null,
           ipHash,
+          ipMasked,
           userAgent,
           success: false,
           metadata: {
@@ -574,6 +659,7 @@ export const authRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "user",
           targetId: user.id,
           ipHash,
+          ipMasked,
           userAgent,
           success: true,
           metadata: { phase: "A", kekRotated: false },

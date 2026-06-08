@@ -5,7 +5,7 @@ import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import { db } from "@/db/client";
 import { attachments, auditEvents, items, users, vaults } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { getStorage } from "@/lib/storage";
 import { paramValidator } from "@/lib/validator";
@@ -13,6 +13,7 @@ import {
   activeOrgForContext,
   requireAuth,
   requireTwoFactorEnrolled,
+  requireVaultUnlocked,
   type AuthVariables,
 } from "@/middleware/auth";
 import { canManageOrgMembers } from "@/lib/orgAccess";
@@ -55,8 +56,21 @@ interface TrashItemDTO {
   vaultId: string;
   vaultName: string;
   type: string;
+  // Phase A / legacy v2 plaintext label. New v2 ZK items carry "" / null here
+  // and the real values in the *Ciphertext fields below (FR-043). Frontend MUST
+  // prefer the ciphertext fields when non-null so it can decrypt+display the
+  // name of a deleted v2 item instead of rendering a placeholder.
   name: string;
   username: string | null;
+  url: string | null;
+  // Phase C ZK metadata ciphertext (base64) — null on v1 + legacy v2 rows.
+  // METADATA ONLY: password/notes secrets are NEVER returned by trash.
+  nameCiphertext: string | null;
+  nameIv: string | null;
+  usernameCiphertext: string | null;
+  usernameIv: string | null;
+  urlCiphertext: string | null;
+  urlIv: string | null;
   deletedAt: string;
   deletedBy: { id: string; displayName: string } | null;
   purgeAt: string;
@@ -103,6 +117,13 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
         type: items.type,
         name: items.name,
         username: items.username,
+        url: items.url,
+        nameCiphertext: items.nameCiphertext,
+        nameIv: items.nameIv,
+        usernameCiphertext: items.usernameCiphertext,
+        usernameIv: items.usernameIv,
+        urlCiphertext: items.urlCiphertext,
+        urlIv: items.urlIv,
         deletedAt: items.deletedAt,
         deletedById: users.id,
         deletedByDisplayName: users.displayName,
@@ -123,6 +144,13 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
       type: r.type,
       name: r.name,
       username: r.username,
+      url: r.url,
+      nameCiphertext: r.nameCiphertext?.toString("base64") ?? null,
+      nameIv: r.nameIv?.toString("base64") ?? null,
+      usernameCiphertext: r.usernameCiphertext?.toString("base64") ?? null,
+      usernameIv: r.usernameIv?.toString("base64") ?? null,
+      urlCiphertext: r.urlCiphertext?.toString("base64") ?? null,
+      urlIv: r.urlIv?.toString("base64") ?? null,
       // deletedAt cannot be null here (filtered isNotNull) — assert for TS.
       deletedAt: r.deletedAt!.toISOString(),
       deletedBy: r.deletedById
@@ -142,7 +170,7 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
       action: "trash.log_viewed",
       targetType: "organization",
       targetId: activeOrg.orgId,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { itemCount: dto.length },
@@ -153,7 +181,7 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
 
   // Permanently empty the trash for the active org. MUST be declared BEFORE the
   // parameterized `/:id` purge route so "empty" is not parsed as an item id.
-  .post("/empty", async (c) => {
+  .post("/empty", requireVaultUnlocked, async (c) => {
     const user = c.get("user")!;
     const { orgId } = await requireTrashAdmin(c);
 
@@ -175,7 +203,7 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "trash",
         targetId: null,
         targetName: null,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { count: 0 },
@@ -195,7 +223,7 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "trash",
         targetId: null,
         targetName: null,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { count: itemIds.length },
@@ -229,7 +257,7 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "item",
       targetId: restored.id,
       targetName: restored.name,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
     });
@@ -239,8 +267,10 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
     });
   })
 
-  // Permanently delete a single soft-deleted item (blobs + row).
-  .delete("/:id", paramValidator(uuidParam), async (c) => {
+  // Permanently delete a single soft-deleted item (blobs + row). HIGH finding:
+  // gated by `requireVaultUnlocked` — an irreversible purge requires the master
+  // password (a stolen cookie alone cannot destroy a trashed secret).
+  .delete("/:id", requireVaultUnlocked, paramValidator(uuidParam), async (c) => {
     const user = c.get("user")!;
     const { id } = c.req.valid("param");
     const { orgId } = await requireTrashAdmin(c);
@@ -260,7 +290,7 @@ export const trashRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "item",
         targetId: id,
         targetName: found.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
       });

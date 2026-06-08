@@ -27,6 +27,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { DeleteWithPasswordDialog } from "@/components/shared/delete-with-password-dialog";
 import { IconTile } from "@/components/icon";
 import { ApiErrorState, ApiLoadingState } from "@/components/shared/api-states";
 import {
@@ -42,13 +43,16 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/provider";
 import { useAuth } from "@/lib/auth/provider";
 import { useVaults } from "@/lib/vaults/provider";
+import { useVaultLock } from "@/components/vault-lock/lock-provider";
+import { decryptZkName } from "@/lib/items-overlay";
 import { isWorkspaceAdmin } from "@/lib/auth/permissions";
 
 export default function TrashPage() {
   const t = useT();
   const router = useRouter();
   const { status, me } = useAuth();
-  const { refresh: refreshVaults } = useVaults();
+  const { refresh: refreshVaults, vaults } = useVaults();
+  const { getVaultKey } = useVaultLock();
 
   // Trash is where permanent delete happens — admin+ only (owner directive).
   // Member/guest who reach it by direct URL are redirected to /app; render a
@@ -85,7 +89,31 @@ export default function TrashPage() {
     setError(null);
 
     listTrash(controller.signal)
-      .then((rows) => setItems(rows))
+      .then(async (rows) => {
+        if (controller.signal.aborted) return;
+        // Decrypt names for v2 (ZK) items. Group by vaultId to fetch each
+        // vault key once, then decrypt all items in that vault.
+        const vaultIds = [...new Set(rows.filter((r) => r.nameCiphertext).map((r) => r.vaultId))];
+        const keyMap = new Map<string, Uint8Array | null>();
+        await Promise.all(
+          vaultIds.map(async (vid) => {
+            const vault = vaults.find((v) => v.id === vid);
+            if (vault?.encryptionVersion === 2) {
+              keyMap.set(vid, await getVaultKey(vid));
+            }
+          }),
+        );
+        const decrypted = await Promise.all(
+          rows.map(async (item) => {
+            if (!item.nameCiphertext || !item.nameIv) return item;
+            const key = keyMap.get(item.vaultId);
+            if (!key) return item;
+            const name = await decryptZkName(item.nameCiphertext, item.nameIv, key);
+            return { ...item, name: name ?? item.name };
+          }),
+        );
+        setItems(decrypted);
+      })
       .catch((err) => {
         if (controller.signal.aborted) return;
         setError(
@@ -298,84 +326,38 @@ export default function TrashPage() {
         }
       />
 
-      {/* Empty-all-trash confirm */}
-      <Dialog open={emptyOpen} onOpenChange={setEmptyOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("trash.confirm.title")}</DialogTitle>
-            <DialogDescription>
-              {t("trash.confirm.desc", { n: items.length })}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEmptyOpen(false)}>
-              {t("common.cancel")}
-            </Button>
-            <Button
-              className="bg-rose-500 text-white hover:bg-rose-500/90"
-              disabled={busy}
-              onClick={handleEmpty}
-            >
-              <Flame className="size-3.5" /> {t("trash.confirm.button")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Empty-all-trash confirm — gated by master password */}
+      <DeleteWithPasswordDialog
+        open={emptyOpen}
+        onOpenChange={setEmptyOpen}
+        title={t("trash.confirm.title")}
+        description={t("trash.confirm.desc", { n: items.length })}
+        confirmLabel={t("trash.confirm.button")}
+        busy={busy}
+        onConfirmed={handleEmpty}
+      />
 
       {/* Per-row permanent-delete confirm */}
-      <Dialog
+      <DeleteWithPasswordDialog
         open={purgeTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) setPurgeTarget(null);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("trash.row_confirm.title")}</DialogTitle>
-            <DialogDescription>
-              {t("trash.row_confirm.desc", { name: purgeTarget?.name ?? "" })}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPurgeTarget(null)}>
-              {t("common.cancel")}
-            </Button>
-            <Button
-              className="bg-rose-500 text-white hover:bg-rose-500/90"
-              disabled={busy}
-              onClick={() => {
-                if (purgeTarget) void handlePurge(purgeTarget);
-              }}
-            >
-              <Trash2 className="size-3.5" /> {t("trash.row_confirm.button")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        onOpenChange={(open) => !open && setPurgeTarget(null)}
+        title={t("trash.row_confirm.title")}
+        description={t("trash.row_confirm.desc", { name: purgeTarget?.name ?? "" })}
+        confirmLabel={t("trash.row_confirm.button")}
+        busy={busy}
+        onConfirmed={() => purgeTarget ? handlePurge(purgeTarget) : Promise.resolve()}
+      />
 
       {/* Bulk permanent-delete confirm */}
-      <Dialog open={bulkPurgeOpen} onOpenChange={setBulkPurgeOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("trash.bulk_confirm.title")}</DialogTitle>
-            <DialogDescription>
-              {t("trash.bulk_confirm.desc", { n: selected.size })}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setBulkPurgeOpen(false)}>
-              {t("common.cancel")}
-            </Button>
-            <Button
-              className="bg-rose-500 text-white hover:bg-rose-500/90"
-              disabled={busy}
-              onClick={handleBulkPurge}
-            >
-              <Trash2 className="size-3.5" /> {t("trash.row_confirm.button")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <DeleteWithPasswordDialog
+        open={bulkPurgeOpen}
+        onOpenChange={setBulkPurgeOpen}
+        title={t("trash.bulk_confirm.title")}
+        description={t("trash.bulk_confirm.desc", { n: selected.size })}
+        confirmLabel={t("trash.row_confirm.button")}
+        busy={busy}
+        onConfirmed={handleBulkPurge}
+      />
 
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-5xl mx-auto px-8 py-8 space-y-4">
@@ -444,7 +426,7 @@ export default function TrashPage() {
                             filtered.length > 0
                           }
                           onCheckedChange={toggleAll}
-                          aria-label={t("common.add")}
+                          aria-label={t("common.select_all")}
                         />
                       </th>
                       <th className="text-left font-semibold py-3">
@@ -493,7 +475,7 @@ export default function TrashPage() {
                               />
                               <div className="min-w-0">
                                 <div className="text-sm font-medium truncate text-foreground">
-                                  {item.name}
+                                  {item.name || t("trash.encrypted_item")}
                                 </div>
                                 <div className="text-[11px] text-muted-foreground">
                                   {t(`item.types.${item.type}`)} ·{" "}

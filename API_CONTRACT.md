@@ -111,6 +111,75 @@ Errors:
 - `409 email_taken` — an account for this email already exists.
 - `429 rate_limited` — more than 5 signups/hour from this IP (`Retry-After`).
 
+### `GET /auth/login-info`
+**Public / pre-auth.** Returns the KDF parameters plus two boolean signals the
+client uses to pick its sign-in / unlock path. Unknown emails get a constant
+decoy shape (the two booleans are **omitted**) so the endpoint cannot enumerate
+accounts.
+
+Request: query param `?email=<email>` (trimmed, lowercased server-side).
+
+Response 200 (known email):
+```json
+{
+  "userId": "usr_...",
+  "kdf": "argon2id",
+  "kdfParams": { "iterations": 3, "memorySize": 65536, "parallelism": 4 },
+  "requiresZk": true,
+  "hasLoginPassword": true
+}
+```
+- **`requiresZk`** — `true` iff a legacy `auth_key_hash` is set. This is a
+  **vault-unlock** signal ONLY: the lock screen uses it to choose the
+  `POST /me/verify-password` payload shape (zero-knowledge auth-key-hash vs
+  plaintext master). It MUST NOT be used to choose the **login** factor.
+- **`hasLoginPassword`** — `true` iff `login_password_hash` is set. This is the
+  **login** factor signal: the client sends the plaintext login password
+  (verified server-side against `login_password_hash`). It is independent of
+  `requiresZk` — an account can have both a login password and a legacy
+  `auth_key_hash`, in which case login MUST use the login password.
+  *Rollout note:* a backend predating this field omits it; clients fall back to
+  `requiresZk`-based behaviour when `hasLoginPassword` is `undefined`.
+- Unknown email → `{ userId: "00000000-...", kdf, kdfParams }` only (no
+  `requiresZk` / `hasLoginPassword`) to avoid leaking account existence.
+
+Login factor selection (client): prefer `hasLoginPassword` → send plaintext
+`password`; else if `requiresZk` → derive + send `authKeyHash` (legacy ZK-only
+accounts with no login password); else send plaintext `password`.
+
+### `GET /auth/kdf-salt`
+**Public / pre-auth.** Returns the per-user Argon2id **salt** the client needs to
+derive the master key BEFORE it has a session (e.g. on the unlock/login screen).
+The salt is **NOT secret** — knowing it does not help derive the key without the
+master password — but the *existence* of an account is. So unknown emails get a
+deterministic decoy of identical shape (anti-enumeration).
+
+> Phase C crypto fix #2: replaces the old predictable client salt
+> `userId.padEnd(16,"0")`. Each user now has a random 32-byte salt stored
+> server-side (`users.kdf_salt`, base64). Legacy users were backfilled with the
+> bytes of their old salt so existing ZK accounts keep deriving the same key.
+
+Request: query param `?email=<email>` (trimmed, lowercased server-side).
+
+Response 200 (`Cache-Control: no-store`):
+```json
+{ "kdfSalt": "<base64>" }
+```
+- Known email → the user's REAL `kdf_salt`.
+- Unknown email / user without a salt → a **deterministic decoy** (HMAC over the
+  lowercased email). Same `{ kdfSalt }` shape, **same value on every probe** for a
+  given email, 32 bytes when base64-decoded → **indistinguishable** from a real
+  salt. The decoy is never usable to derive a real key.
+
+Errors:
+- `401 invalid_credentials` — `email` query param missing.
+- `429 rate_limited` — same tier as `POST /auth/login` (5/IP + 5/IP+email per
+  15 min; `Retry-After` set).
+
+Frontend flow: call this with the typed email, derive the master key with the
+returned salt, then either log in or unlock. Once authenticated, prefer the
+`kdfSalt` field on `GET /me` (no enumeration concern there — the user is known).
+
 ### `POST /auth/login`
 Verifies the **login** password (`login_password_hash`) — never the master
 password. An account with no login password (SSO-only / legacy) cannot sign in
@@ -275,7 +344,10 @@ interface VaultSummary {
   color: VaultColor | null;      // null = default color
   itemCount: number;
   memberCount: number;
-  encryptionVersion: number;     // bumped when re-key happens; round 2 = 1
+  encryptionVersion: number;     // 1 = server-side envelope, 2 = zero-knowledge
+  keyVersion: number;            // monotonic vault-key generation; echo as expectedKeyVersion on rekey/migrate
+  rekeyPending: boolean;         // true after a member was revoked from a v2 vault → needs POST /vaults/:id/rekey (AC-024.5)
+  rollbackAvailableUntil: string | null; // ISO-8601 until which a v1→v2 migration can be rolled back (oldest backup + 30d), or null when no rollback backup exists. Lets the UI keep showing the rollback button after refresh.
   role: "manager" | "editor" | "user" | "viewer";  // caller's role
   createdAt: string;             // ISO-8601
   updatedAt: string;
@@ -352,6 +424,21 @@ Response 200:
 { "members": [VaultMember, ...] }
 ```
 
+### `GET /vaults/:id/member-keys`
+Returns the **effective member roster + X25519 public keys** for a vault, used by the client to wrap the new vault key for every member during a re-key / v1→v2 migration (AC-024.5, Wave-3b).
+
+Result is the **union** of direct `vault_members` and users who hold the vault via a **team** grant (`vault_team_members`), deduped by `userId`.
+
+Authorization: org `owner`/`admin` **OR** a vault `manager`. Anyone else → `403 forbidden`. Out-of-scope / soft-deleted vault id → `404 not_found` (scoped to the caller's active org).
+
+Response 200:
+```json
+{ "memberKeys": [ { "userId": "uuid", "email": "string", "publicKey": "base64 | null" }, ... ] }
+```
+`publicKey = null` means the member has **not enrolled ZK** yet — the client should warn that this member will lose access after the migrate/rekey completes. Public keys only wrap (never unwrap) so they carry no decryption power; no secret material is returned.
+
+> This roster (direct ∪ team-derived, deduped) is **exactly** the roster `POST /vaults/:id/rekey` and `POST /vaults/:id/migrate` validate `wrappedKeys` against — members with `publicKey = null` are excluded from the requirement (the client cannot wrap to a missing key and the server rejects a wrap "for" them). Build `wrappedKeys` from this endpoint's `memberKeys` filtered to `publicKey != null`.
+
 ### `POST /vaults/:id/members`
 Request: `{ "userId": "uuid", "role": "manager|editor|user|viewer" }`.
 Response 201:
@@ -369,6 +456,150 @@ Response 200:
 
 ### `DELETE /vaults/:id/members/:userId`
 Response 204 (no body).
+
+On a **v2 (zero-knowledge) vault** this additionally cuts the removed member's
+server-side access immediately (deletes their `vault_keys` row) and flags the
+vault `rekeyPending = true` (AC-024.5). The vault now needs a client-driven
+re-key (`POST /vaults/:id/rekey`) to rotate the key + re-encrypt every item.
+Emits a `vault.rekey_pending` audit event in addition to `vault.revoke`. On a
+**v1 vault** the behaviour is unchanged (AC-024.4 — DB-side access revoke only).
+
+> Removing a member from the **workspace** (`DELETE /members/:userId`) does the
+> same for every v2 vault in the org where the user held a wrapped key — strips
+> their `vault_members` rows in that org, deletes their `vault_keys`, flags each
+> affected vault `rekeyPending`, and emits one `vault.rekey_pending` per vault
+> (returned in the `member.remove` audit metadata as `rekeyPendingVaults`).
+
+> **Residual risk (documented, inherent to client-side E2E):** until an admin
+> runs the re-key, a revoked member who CACHED the old vault key in their browser
+> can still locally decrypt ciphertext they already pulled. Server-side access is
+> cut the instant they are revoked; the cached-key window is what re-key + item
+> re-encryption closes. This is why rotation+re-encryption (not just key deletion)
+> is required.
+
+## Endpoints — Vault re-key & migration (Phase C Wave-2b)
+
+All three endpoints are **client-driven**: the server holds no vault key, search
+key, or plaintext, so it cannot re-encrypt or re-wrap itself. An authorized
+member's browser computes the new wrapped keys + re-encrypted item blobs +
+recomputed blind-index terms and POSTs them; the server applies the result in a
+**single atomic transaction** under a `SELECT … FOR UPDATE` lock on the vault row.
+
+**Optimistic concurrency:** every payload carries `expectedKeyVersion` (the
+`keyVersion` the client computed against) and `newKeyVersion` (= expected + 1).
+If a concurrent rotation already bumped the row, the write is rejected with
+`409 rekey_conflict` (body `details.currentKeyVersion`) — reload and retry.
+
+**Completeness:** the `items` array MUST cover **every** live (non-deleted) item
+in the vault, and `wrappedKeys` MUST cover **every ZK-enrolled** member of the
+**effective roster** (direct `vault_members` ∪ team-derived `vault_team_members`,
+deduped — identical to `GET /vaults/:id/member-keys`). A member with no X25519
+public key (`publicKey = null`) is **excluded**: not required and not accepted
+(a wrap "for" them would be junk → silent lockout → `400 validation_error`).
+Every `wrappedKeys.userId` must be an org member and on the effective roster.
+The membership snapshot is read **inside** the `FOR UPDATE` transaction, so a
+concurrent member add/remove cannot break the invariant mid-rotation. A gap is
+rejected (no half-applied generation) — see error codes below.
+
+> **keyVersion is dynamic.** A rollback (`POST /vaults/:id/migrate/rollback`)
+> bumps `keyVersion` to retire the v2 generation, so a subsequent re-migration
+> must echo the **current** `keyVersion` from `GET /vaults/:id` as
+> `expectedKeyVersion` (it is NOT always 1). A stale echo → `409 rekey_conflict`.
+
+Shared payload shapes:
+
+```ts
+interface WrappedKey { userId: string; wrappedKey: string; } // wrappedKey = base64
+
+interface ReItem {
+  id: string;                          // existing item UUID in this vault
+  nameCiphertext: string;  nameIv: string;                 // base64, required
+  usernameCiphertext?: string | null; usernameIv?: string | null;
+  urlCiphertext?: string | null;      urlIv?: string | null;
+  passwordCiphertext?: string | null; passwordIv?: string | null;
+  notesCiphertext?: string | null;    notesIv?: string | null;
+  searchTerms?: string[];             // base64 HMAC-SHA256 (44 chars each); REPLACES the item's term set
+}
+```
+
+### `POST /vaults/:id/rekey`
+Rotate a **v2** vault's key and re-encrypt every item (used after a revoke).
+Auth: vault **manager** (404 masks a vault the caller can't see; 403 if the
+caller is a member but not a manager). Request:
+
+```jsonc
+{
+  "expectedKeyVersion": 2,            // current keyVersion
+  "newKeyVersion": 3,                 // must be expectedKeyVersion + 1
+  "wrappedKeys": [ { "userId": "<uuid>", "wrappedKey": "<b64>" } ],
+  "items":       [ /* ReItem … one per live item */ ]
+}
+```
+
+Atomic apply: replace ALL `vault_keys` (delete + insert), update every item's
+ciphertext columns (plaintext `name` scrubbed to `""`, `username`/`url` → NULL,
+v1 `dek_ciphertext`/`dek_iv` → NULL), **replace** each item's `item_search_terms`,
+bump `vaults.keyVersion`, clear `rekeyPending`. Audit `vault.rekey`.
+
+Response 200:
+```jsonc
+{ "keyVersion": 3, "rekeyPending": false, "itemCount": 12 }
+```
+
+### `POST /vaults/:id/migrate`
+Opt-in **v1 → v2** migration (server-side envelope → zero-knowledge), **reversible**
+within 30 days. Auth: workspace **owner / admin** only (migration changes the
+whole vault's crypto generation). Vault must be `encryptionVersion === 1`.
+Same request body as `/rekey` (`expectedKeyVersion` is the v1 vault's `keyVersion`,
+normally `1`).
+
+Atomic apply: snapshot every live item's full v1 state into
+`vault_migration_backups` (base64 ciphertext + IVs + LOCAL_KEK-wrapped DEK +
+plaintext metadata — the data the server already held; no v2 key, no plaintext
+secret, so zero-knowledge is preserved), then apply the v2 payload exactly like
+`/rekey` and set `encryptionVersion = 2`. Audit `vault.migrate`.
+
+Response 200:
+```jsonc
+{
+  "encryptionVersion": 2,
+  "keyVersion": 2,
+  "itemCount": 12,
+  "rollbackAvailableUntil": "2026-07-02T00:00:00.000Z"   // now + 30 days
+}
+```
+
+### `POST /vaults/:id/migrate/rollback`
+Revert a v1→v2 migration within the retention window. Auth: workspace
+**owner / admin**. Vault must be `encryptionVersion === 2` AND have migration
+backups. No request body. Atomic apply: restore each item's v1 plaintext +
+envelope from its backup, drop the v2 ciphertext-metadata columns + the item's
+`item_search_terms`, delete all `vault_keys` + the backups, set
+`encryptionVersion = 1`, bump `keyVersion` (the v2 generation is retired — never
+reused). Audit `vault.migrate_rollback`.
+
+Response 200:
+```jsonc
+{ "encryptionVersion": 1, "restoredItemCount": 12 }
+```
+
+Backups older than 30 days are purged by a background job (Task C.4, hourly in
+the in-process sweeper); after purge rollback returns `409 rollback_unavailable`.
+
+### Error codes (re-key & migration)
+
+| HTTP | `error.code` | Meaning |
+|---|---|---|
+| 403 | `forbidden` | not a vault manager (rekey) / not owner-admin (migrate, rollback), or `wrappedKeys` references a user outside the workspace |
+| 404 | `not_found` | vault invisible to caller (masks existence) |
+| 409 | `rekey_conflict` | `expectedKeyVersion` ≠ the live `keyVersion` (a concurrent rotation won); `details.currentKeyVersion` |
+| 409 | `rekey_incomplete_items` | payload omits a live item (`details.missingItemId`) |
+| 409 | `rekey_incomplete_members` | `wrappedKeys` omits a ZK-enrolled member of the effective roster (`details.missingUserId`) |
+| 409 | `rekey_not_zk` | `/rekey` called on a v1 vault |
+| 409 | `migrate_not_v1` | `/migrate` called on a vault that is not v1 |
+| 409 | `rollback_not_v2` | `/rollback` called on a vault not in the migrated v2 state |
+| 409 | `rollback_unavailable` | no migration backup (never migrated, or retention elapsed) |
+| 400 | `validation_error` | `newKeyVersion` ≠ `expectedKeyVersion + 1`, duplicate id, foreign item id, non-member key, a key for a member who has not enrolled ZK (`publicKey = null`), malformed base64 term |
 
 ## Endpoints — Items
 
@@ -392,6 +623,22 @@ interface ItemSummary {
   name: string;
   username: string | null;          // null for note
   url: string | null;               // null for note
+
+  // --- Phase C ZK metadata (FR-043 / AC-017.2 / NFR-032) ---
+  // Present ONLY for items in a v2 (zero-knowledge) vault that have had their
+  // metadata encrypted. base64 AES-256-GCM ciphertext + 12-byte IV, encrypted
+  // CLIENT-SIDE with the vault key. When `nameCiphertext` is non-null the
+  // plaintext `name` above is "" (server never holds it) and the frontend MUST
+  // decrypt `nameCiphertext` for display. Same rule for username/url. NULL on
+  // all v1 items and on legacy v2 items not yet re-indexed (v1+legacy still use
+  // the plaintext columns above — read paths tolerate BOTH shapes).
+  nameCiphertext: string | null;
+  nameIv: string | null;
+  usernameCiphertext: string | null;
+  usernameIv: string | null;
+  urlCiphertext: string | null;
+  urlIv: string | null;
+
   tags: string[];                   // empty array in round 2
   favorite: boolean;                // false in round 2 (no toggle endpoint yet)
   hasPassword: boolean;             // server-derived: true iff ciphertext present
@@ -400,6 +647,26 @@ interface ItemSummary {
   createdAt: string;
   updatedAt: string;
   lastUsedAt: string | null;
+
+  // --- US-015 AC-015.3 / FR-039: rotation tracking ---
+  passwordChangedAt: string | null; // ISO; null when the item never had a password
+
+  // --- US-060 / AC-060.1-3 / FR-039: password rotation policy + status ---
+  // rotationPolicyDays: the item's OWN rotation window (days), or null = inherit
+  //   the org default (organizations.settings.rotationDefaultDays). 0/negative is
+  //   normalized to null at write time.
+  rotationPolicyDays: number | null;
+  // rotationStatus: server-computed badge state from passwordChangedAt + the
+  //   EFFECTIVE policy (item override ?? org default). Drives 🟢🟡🔴 (AC-060.3):
+  //     "none"    — no policy applies OR the item has no password (no badge)
+  //     "fresh"   — 🟢 due date > 14 days away
+  //     "due"     — 🟡 within 14 days of the due date (inclusive), not past
+  //     "overdue" — 🔴 due date has passed
+  rotationStatus: "none" | "fresh" | "due" | "overdue";
+  // rotationDueAt: ISO instant the password is due (= passwordChangedAt +
+  //   effective days), or null when rotationStatus is "none".
+  rotationDueAt: string | null;
+
   createdBy: { id: string; displayName: string };
 }
 
@@ -478,6 +745,31 @@ Request:
   }
   ```
 - `folderId` is honored (must belong to the same vault). `tags`, `favorite`, `totpSecret`, `customFields` are accepted but ignored as top-level inputs — they live inside the encrypted notes blob.
+
+**Phase C ZK vault (`vault.encryptionVersion === 2`) — FR-043 / AC-017.2 / NFR-032:**
+The client encrypts ALL metadata and supplies a blind index. Request shape:
+```jsonc
+{
+  "type": "login",
+  "name": "",                          // MUST be "" when sending nameCiphertext
+  "nameCiphertext": "<base64 AES-GCM>", // real name, client-encrypted w/ vault key
+  "nameIv": "<base64 12 bytes>",
+  "usernameCiphertext": "<base64>|null",
+  "usernameIv": "<base64>|null",
+  "urlCiphertext": "<base64>|null",
+  "urlIv": "<base64>|null",
+  "passwordCiphertext": "<base64>",     // ZK password blob (as before)
+  "passwordIv": "<base64>",
+  "notesCiphertext": "<base64>",        // meta blob incl. tags/totp (as before)
+  "notesIv": "<base64>",
+  "searchTerms": ["<base64 HMAC>", ...] // blind-index tokens (see Search section)
+}
+```
+- Validation: send **`name` (non-empty) XOR `nameCiphertext`** — both or neither → 400. New v2 clients send `name: ""` + `nameCiphertext`. The server then stores `name=""`, `username=NULL`, `url=NULL` (never the plaintext) and persists the ciphertext + a fresh `item_search_terms` row set in ONE transaction.
+- Legacy/transition: a v2 client that omits `nameCiphertext` still works (plaintext path) — the server tolerates both until the wave-3 re-index.
+- `searchTerms` is the full token set for this item; on create it seeds the blind index. Omit it (or send `[]`) for an item with no searchable fields.
+- `rotationPolicyDays` (optional, US-060 / AC-060.1): integer per-item rotation window in days. `null`/`0`/omitted = inherit the org default (`organizations.settings.rotationDefaultDays`). Clamped to `[1, 3650]`; `0`/negative is stored as `null`. Works for BOTH v1 and v2 items. The response `ItemSummary` carries the computed `rotationStatus`/`rotationDueAt`.
+
 Response 201:
 ```json
 { "item": ItemSummary }
@@ -489,15 +781,21 @@ Response 200:
 ```json
 { "item": ItemFull }
 ```
-Decrypts `password` and `notes` server-side and returns them inline.
-Audit event `item.reveal` is recorded with `target_id` = item id.
+Phase A (v1): decrypts `notes` server-side and returns it inline (`password` always `null` here — reveal it via `GET /items/:id/password`). Phase C (v2): returns `notesCiphertext`/`notesIv` for the client to decrypt, and the ItemSummary `nameCiphertext`/`usernameCiphertext`/`urlCiphertext` fields. Audit event `item.view` is recorded.
 
 ### `PATCH /items/:id`
-Request: any subset of `{ "type", "name", "username", "url", "password", "notes", "folderId" }`.
+Request (v1): any subset of `{ "type", "name", "username", "url", "password", "notes", "folderId", "rotationPolicyDays" }`.
 - `type` (optional) converts the item between the six kinds (plaintext label only — the client re-encodes the notes meta blob + re-routes the primary secret).
 - Sending `"password": null`/`""` or `"notes": null`/`""` clears the field.
 - Sending the key with a string value re-encrypts.
 - Omitting the key leaves the existing ciphertext untouched.
+
+Request (v2 ZK — FR-043): subset of `{ "nameCiphertext"/"nameIv", "usernameCiphertext"/"usernameIv", "urlCiphertext"/"urlIv", "passwordCiphertext"/"passwordIv", "notesCiphertext"/"notesIv", "folderId", "searchTerms" }`.
+- Sending `nameCiphertext` re-encrypts the name AND blanks the server's plaintext `name` to `""` (scrubs a previously-plaintext v2 item on its next edit). `usernameCiphertext`/`urlCiphertext` accept `null` to clear; sending them also nulls the matching plaintext column.
+- `searchTerms` present (even `[]`) → REPLACES the item's whole blind-index set (delete-all + insert, in the same tx as the update + version snapshot). Omit it to leave the existing terms untouched (e.g. a `folderId`-only PATCH).
+- Any metadata-ciphertext change counts as a content change → creates a version snapshot (FR-037) like a plaintext metadata edit does.
+- `rotationPolicyDays` (US-060): same shape as create (`null`/`0` = inherit org default; clamped). Accepted on BOTH v1 and v2. Changing it is **metadata-only** — it does NOT create a version snapshot and does NOT reset `passwordChangedAt`.
+
 Response 200:
 ```json
 { "item": ItemSummary }
@@ -544,35 +842,110 @@ Per-item `failed.reason` values:
 
 **Share semantics** mirror single-share (`POST /items/:id/members`): a plain **permanent** grant (no expiry), idempotent upsert keyed on `(itemId, principal)` — re-sharing updates the role only and never disturbs an existing temp grant's `originalRole` baseline. Each successful share writes an `item.share` (user) / `item.team_share` (team) audit event with `metadata.bulk: true` and emits a `share.received` notification. No secret values are ever logged.
 
+### `GET /items/rotation-due` (US-060 / AC-060.2 / FR-039)
+
+Dashboard feed for the "N secrets need rotation" widget. Returns the items in the caller's **active workspace** whose password is `due` or `overdue` under the effective policy (item override ?? org default), plus counts. RBAC: only items the caller can reach (same most-specific-wins engine + auditor→viewer short-circuit as `GET /search`); items in other orgs / behind a missing grant are omitted (anti-enumeration). Auth + 2FA required. **No secret material** — names only (for v2 items `name` is `""` and `nameCiphertext` is returned for the client to decrypt). Not audited (a count is not a reveal).
+
+Response 200:
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "vaultId": "uuid",
+      "vaultName": "Production",
+      "type": "login",
+      "name": "AWS root key",          // "" for v2 — decrypt nameCiphertext
+      "nameCiphertext": "<base64>|null",
+      "nameIv": "<base64>|null",
+      "rotationStatus": "overdue",      // only "due" | "overdue" appear here
+      "rotationDueAt": "2026-05-01T00:00:00.000Z",
+      "rotationPolicyDays": 90,         // null = inherited from org default
+      "passwordChangedAt": "2026-01-31T00:00:00.000Z",
+      "effectiveRole": "manager"
+    }
+  ],
+  "counts": { "due": 3, "overdue": 9, "total": 12 }
+}
+```
+Items are sorted **overdue first, then soonest-due**. `counts.total === items.length` (the reachable, due-or-overdue set). When the caller has no active org or no reachable due items, `items` is `[]` and all counts are `0`.
+
+### `GET /items/:id/versions` (US-015 / FR-037)
+Returns the last 10 version snapshots (metadata only — version number, type, name, editor email, timestamps, `hasPassword`/`hasNotes`). VIEW-gated (any effective access). `{ "canReveal": boolean, "versions": [...] }` — `canReveal` reflects whether the caller may reveal a version's secret content.
+
+### `GET /items/:id/versions/:version` (US-015)
+Reveals one historical snapshot's CONTENT. REVEAL-gated (viewer/auditor → 403); gated by `requireVaultUnlocked`. Audited as `item.version_view`.
+- **v1 (Phase A):** returns decrypted `{ password, notes }` inline alongside `{ version, type, name, username, url, createdAt, editedByEmail }`.
+- **v2 (ZK):** returns the snapshot's ciphertext blobs for the client to decrypt — `passwordCiphertext`/`passwordIv`, `notesCiphertext`/`notesIv`, AND (Wave-2a gap fix) the metadata-ciphertext snapshot **`nameCiphertext`/`nameIv`, `usernameCiphertext`/`usernameIv`, `urlCiphertext`/`urlIv`**. For a v2 snapshot `name` is `""` / `username`/`url` are `null`; the real values live in the ciphertext fields. Legacy v2 snapshots written before this fix return `null` for the metadata-ciphertext fields → the client falls back to the plaintext `name`/`username`/`url`. Version snapshots are **never** added to the blind-index (`item_search_terms`) — only live items are searchable.
+
+## Endpoints — Trash (soft-delete recycle bin)
+
+Org-wide recycle bin. Every handler is **admin-only** (org `owner`/`admin`) and scoped to the caller's active org; vault membership is NOT consulted. Out-of-scope / not-deleted ids collapse to `404` (anti-enumeration). Requires 2FA enrollment.
+
+### `GET /trash`
+Lists all soft-deleted items across every vault in the active org.
+
+Response 200:
+```json
+{ "items": [ TrashItem, ... ] }
+```
+```ts
+interface TrashItem {
+  id: string;
+  vaultId: string;
+  vaultName: string;
+  type: string;
+  // Phase A / legacy v2: plaintext label. New v2 ZK items send "" / null here
+  // and carry the real values in the *Ciphertext fields below — prefer those.
+  name: string;
+  username: string | null;
+  url: string | null;
+  // Phase C ZK metadata ciphertext (base64), null on v1 + legacy v2 rows.
+  // METADATA ONLY — password/notes secrets are NEVER returned by trash.
+  nameCiphertext: string | null;
+  nameIv: string | null;
+  usernameCiphertext: string | null;
+  usernameIv: string | null;
+  urlCiphertext: string | null;
+  urlIv: string | null;
+  deletedAt: string;            // ISO-8601
+  deletedBy: { id: string; displayName: string } | null;
+  purgeAt: string;              // ISO-8601, advisory (deletedAt + 30d); no auto-purge yet
+}
+```
+The client decrypts the ciphertext metadata (with the vault key) to display the name of a deleted v2 item instead of a placeholder.
+
+### `POST /trash/empty`
+Permanently purges every soft-deleted item in the org (attachment blobs + rows). Response `{ "purged": number }`.
+
+### `POST /trash/:id/restore`
+Restores one soft-deleted item. Response `{ "item": { id, vaultId, name } }`.
+
+### `DELETE /trash/:id`
+Permanently purges one soft-deleted item (blobs + row). Response 204.
+
 ## Endpoints — Search
 
-### `GET /search` (US-017 / AC-017.2/.3/.5 · FR-041/042 — Cmd+K)
+Search has **two endpoints**, split by vault `encryptionVersion`, because the
+server's knowledge of the data differs fundamentally. A user with BOTH v1 and v2
+vaults runs the two calls **in parallel** and merges results client-side — the
+result row shape is identical (every row carries both the plaintext and the
+ciphertext metadata fields; v1 rows fill the plaintext ones, v2 rows fill the
+ciphertext ones). Both endpoints: require auth + 2FA, are NOT audited per-query,
+never log the query/tokens, share one rate limit (`120/min/user`), and apply the
+same RBAC + active-org scope below.
 
-Fuzzy item search over **plaintext metadata only**. Phase A is server-side
-search; Phase C will swap in a client-built blind index. Requires auth + 2FA
-enrollment (same gate as the rest of the app). NOT audited per-query and the
-query string is never logged.
-
-Query params:
-- `q` — required, 1–200 chars (trimmed). Matched case-insensitively as a
-  substring against `name`, `username`, `url`, and `type` (the only plaintext
-  columns). Secret fields and the encrypted notes meta blob (tags, totp, card
-  number, etc.) are NEVER searched.
-- `limit` — optional int, 1–50, default **20**.
-
-RBAC + scope:
+**Shared RBAC + scope (both endpoints):**
 - Scoped to the caller's **active workspace** (`vaults.orgId` = active org).
 - Each result is filtered to items the caller can access at ≥ `view_metadata`
   via the same most-specific-wins engine as `GET /vaults/:id/items` (item
   override → folder grant → vault membership → team grants, honoring temp-grant
   expiry). Items with no effective grant are omitted (anti-enumeration — a query
   never reveals the existence of items in another org or behind a missing
-  permission). An `auditor` sees the whole active org as `viewer`.
+  permission, and v2 blind search never reveals that a token MATCHED an
+  inaccessible item). An `auditor` sees the whole active org as `viewer`.
 
-Sort (AC-017.3): exact (case-insensitive) name match first → most recently used
-(`lastUsedAt DESC`, nulls last) → alphabetical by name.
-
-Response 200:
+**Shared result row shape (both endpoints):**
 ```ts
 {
   results: Array<{
@@ -580,10 +953,16 @@ Response 200:
     vaultId: string;
     vaultName: string;
     folderId: string | null;
-    type: ItemType;                 // one of the six kinds
-    name: string;
-    username: string | null;
-    url: string | null;
+    type: ItemType;
+    name: string;                   // v1: plaintext. v2: "" (use *Ciphertext)
+    username: string | null;        // v2: null
+    url: string | null;             // v2: null
+    nameCiphertext: string | null;  // v2: base64; v1: null
+    nameIv: string | null;
+    usernameCiphertext: string | null;
+    usernameIv: string | null;
+    urlCiphertext: string | null;
+    urlIv: string | null;
     hasPassword: boolean;
     hasNotes: boolean;
     lastUsedAt: string | null;
@@ -592,8 +971,74 @@ Response 200:
   }>;
 }
 ```
-No secret material (password/notes/ciphertext) is ever included. Returns
+No secret material (password/notes plaintext) is ever included. Returns
 `{ "results": [] }` when the caller has no active workspace or nothing matches.
+
+---
+
+### `GET /search` (Phase A · v1 vaults — US-017 / AC-017.2/.3/.5 · FR-041/042)
+
+Fuzzy server-side search over **plaintext metadata only**, scoped to v1
+(`encryptionVersion = 1`) vaults. **v2 items are EXCLUDED** (their plaintext
+columns are blank).
+
+Query params:
+- `q` — required, 1–200 chars (trimmed). Matched case-insensitively as a
+  substring (ILIKE + pg_trgm) against `name`, `username`, `url`, and `type`.
+  Secret fields and the encrypted notes meta blob are NEVER searched.
+- `limit` — optional int, 1–50, default **20**.
+
+Sort (AC-017.3): exact (case-insensitive) name match → most recently used
+(`lastUsedAt DESC`, nulls last) → alphabetical by name.
+
+---
+
+### `POST /search/blind` (Phase C · v2 vaults — FR-043 / AC-017.2 / NFR-032)
+
+Zero-knowledge blind-index search, scoped to v2 (`encryptionVersion = 2`)
+vaults. The server matches **opaque HMAC tokens** by equality — it never sees the
+query plaintext, the per-vault search key, or any metadata plaintext.
+
+Request body:
+```jsonc
+{
+  "terms": ["<base64 HMAC-SHA256>", ...],  // 1..200 query tokens
+  "limit": 20                              // optional int 1..50, default 20
+}
+```
+- Each token is the base64 of a 32-byte HMAC digest (44 chars, `…=`-padded).
+- The server matches items whose `item_search_terms` contain ANY of the tokens,
+  ranks by **number of distinct tokens matched** (so all-words-match ranks
+  above one-word-match), then `lastUsedAt DESC`, then `updatedAt DESC` (no
+  alphabetical tiebreak — the name is encrypted).
+
+#### Client token model (frontend MUST implement EXACTLY this)
+
+Both write-time (`searchTerms` on item create/update) and search-time (`terms`)
+use the identical derivation so tokens line up. **The server defines the
+contract but runs none of it.**
+
+1. **Search key** (per vault, never sent to the server):
+   ```
+   searchKey = HKDF-SHA256(
+     ikm  = vaultKey,                 // the 32-byte vault key (ZK hierarchy)
+     salt = 0x00 * 32,                // 32 zero bytes
+     info = utf8("woxa-blind-index-v1" + vaultId),
+     len  = 32 bytes
+   )
+   ```
+2. **Normalize** each searchable field value: `lowercase` then `trim`.
+3. **Tokenize** each normalized field into a deduped set of:
+   - **words** — split on any run of non-`[a-z0-9]` characters, drop empties;
+   - **trigrams** — every length-3 substring of the field with internal
+     whitespace collapsed to single spaces (gives substring/fuzzy matching).
+4. **HMAC** each token: `HMAC-SHA256(searchKey, utf8(token))` → base64.
+5. **Item write**: union the tokens of ALL searchable fields
+   (`name`, `username`, `url`, and each tag), HMAC them, send as `searchTerms`.
+6. **Query**: tokenize the query string the SAME way (step 2–4), send as `terms`.
+
+Searchable fields for tokenization: `name`, `username`, `url`, `tags[]`. Do NOT
+tokenize the password or the notes/meta blob.
 `q` missing/empty/too long → 400 `validation_error`.
 
 ## User shape (canonical)
@@ -691,6 +1136,8 @@ Response 204 (no body).
 ### Workspace lifecycle (single-Owner model)
 
 `GET /me` now includes: `hasWorkspace: boolean`, `workspaceCount: number`, `activeOrgId: string | null` (alongside the existing `role`, `requiresPasswordSetup`, …). Use these to route a freshly-signed-in user to `/spaces` when `hasWorkspace` is false.
+
+`GET /me` also returns **`kdfSalt: string | null`** (base64) — the authenticated user's per-user Argon2id master-key-derivation salt (Phase C fix #2). Use this for unlock/master-key derivation once the user is known; it equals the value `GET /auth/kdf-salt` returns for the same account. `null` only for a row that predates the backfill (should not occur after migration 0030).
 - **`activeOrgId`** = the session's **active** workspace (the org set by `POST /workspace/switch`, falling back to the first membership when unset/deleted). It is NOT simply "the first org" anymore.
 - **`role`** = the caller's role **in that active org**. Switching workspaces flips this value, so the frontend should re-read `GET /me` (or use the `POST /workspace/switch` response) after a switch to refresh role-gated UI.
 - `workspaceCount` / `hasWorkspace` count **all** memberships and are unaffected by the active selection.
@@ -752,6 +1199,10 @@ interface WorkspaceSettings {
                             // accessing secrets (server-side enforced)
   autoLockMinutes: number;  // vault idle auto-lock window; server-clamped to
                             // [1, 120], default 15
+  rotationDefaultDays: number | null; // US-060: org-wide DEFAULT password-rotation
+                            // window (days). null = no default. Items with no own
+                            // rotationPolicyDays inherit this. Clamped [1, 3650];
+                            // 0/negative stored as null.
   sso: {
     allowedDomains: string[]; // email/`hd` domains permitted to SSO; server-
                               // normalized (lowercase/trim/dedupe + shape-
@@ -770,6 +1221,7 @@ interface WorkspaceSettings {
 - `sso.allowedDomains` — `string[]`, **max 100** entries (Zod). The server **normalizes** every PATCH: lowercases + trims, drops empties and shape-invalid entries (must match a basic `label.label.tld` domain — no scheme/path/spaces), and dedupes (first occurrence wins, order preserved). What you GET back is the canonical normalized list, which may be shorter than what you PATCHed.
 - `sso.jitEnabled` — defaults **true** (preserves current JIT auto-provisioning); only an explicit `false` disables it for the claiming org.
 - `sso.requireSso` — defaults **false**; enabling it is opt-in (Phase B login enforcement; not yet enforced at login).
+- `rotationDefaultDays` (US-060 / AC-060.1) — integer days or `null`. The org-wide default rotation window applied to any item whose own `rotationPolicyDays` is `null`. **Clamped to `[1, 3650]`**; `0`/negative/garbage → `null` (no default). PATCHable by owner+admin like the other policy fields.
 
 #### `GET /workspace/settings`
 Auth required. Returns the policy for the caller's **own** workspace (org resolved
@@ -781,6 +1233,7 @@ forced-enrollment banner.
   "settings": {
     "require2fa": false,
     "autoLockMinutes": 15,
+    "rotationDefaultDays": null,
     "sso": { "allowedDomains": [], "jitEnabled": true, "requireSso": false }
   }
 }
@@ -818,6 +1271,7 @@ Always returns the **full, current** policy (same envelope as `GET /workspace/se
   "settings": {
     "require2fa": true,
     "autoLockMinutes": 30,
+    "rotationDefaultDays": 90,
     "sso": { "allowedDomains": ["iux24.com"], "jitEnabled": false, "requireSso": false }
   }
 }
@@ -1408,32 +1862,49 @@ interface AuditEvent {
   targetId: string | null;
   targetName: string | null;
   ipHash: string | null;
+  ipMasked: string | null;            // masked DISPLAY value — render this in the IP column
   userAgent: string | null;
   success: boolean;
   metadata: Record<string, unknown>;
   occurredAt: string;
 }
 ```
+> **`ipMasked`** is a privacy-preserving display string: only the first two octets (IPv4, e.g. `"203.0.•.•"`) or first two hextets (IPv6, e.g. `"2001:db8:•"`) of the caller IP, the rest masked with `•` (U+2022). The **full IP is never stored** (PDPA data minimization) — older rows (pre-2026-06) have `null`. `ipHash` remains the HMAC of the full IP for rate-limiting + exact-IP correlation/confirmation; it is *not* a display value.
 
 ### `GET /audit`
-Query params (all optional):
-- `cursor` — opaque cursor returned by the previous page; encodes `(occurred_at, id)` keyset. Omit on the first page.
-- `limit` — 1–200, default 50.
-- `actor` — actor user id.
+PAGE-based pagination (changed 2026-06-05 — was cursor-based "load more"). All filters are applied **server-side** so the `total`/page math is accurate. Query params (all optional):
+- `page` — int ≥ 1, default `1` (1-based). Offset = `(page-1) * limit`.
+- `limit` — int 1–200, default **25** (UI offers 25/50/75/100).
 - `action` — exact action string (e.g. `item.reveal`).
+- `q` — string 1..120. Case-**insensitive** partial match (`ILIKE '%q%'`) across `actorEmail`, `action`, and `targetName`; matches ANY of those columns (OR). LIKE wildcards (`%`, `_`) in the input are escaped and matched **literally** (a bare `%` does NOT match all rows).
+- `actor` — **repeatable** actor user id (uuid). Pass it multiple times (`?actor=<id>&actor=<id>`) to filter on a union (`actor_user_id IN (...)`). A single value still works. A malformed uuid → `400`.
 - `from` — ISO-8601 lower bound (inclusive) on `occurred_at`.
 - `to` — ISO-8601 upper bound (exclusive) on `occurred_at`.
 
 Response 200:
 ```json
-{ "events": [AuditEvent, ...], "nextCursor": "string|null" }
+{ "events": [AuditEvent, ...], "total": 0, "page": 1, "limit": 25 }
 ```
+- `total` — `COUNT(*)` of ALL rows matching the scope + filters (NOT just the current page), computed with a separate count query using the identical WHERE. Lets the UI render "Showing X–Y of Z".
+- `events` — the page slice, ordered `occurred_at DESC, id DESC`, `LIMIT limit OFFSET (page-1)*limit`.
+- The cursor / `nextCursor` field is **removed** from this endpoint (the UI no longer uses keyset paging here). Callers that read `.events` are unaffected.
+
+Scope:
+- This org's events, PLUS account-level events written without an `org_id` (sign-in/out, 2FA, vault-unlock, recovery) whose actor is a member of this org. The scope AND every filter apply to BOTH the page query and the count.
 
 Authorization:
-- Org `owner` / `admin` see every event for their org.
-- Anyone else (`member`, vault `manager`/`editor`/`user`/`viewer`) sees only events where `actor_user_id = <self>`. The richer "events on vaults I belong to" filter is deferred until we add a join column on audit rows — flagged as a TODO in the route file.
+- Org `owner` / `admin` / `auditor` see every event in their **active** workspace.
+- Everyone else (`member`, `guest`, vault `manager`/`editor`/`user`/`viewer`) → `403`. The audit log is an admin-only surface; there is no self-scoped fallback. (Per-item activity for vault managers lives at `GET /items/:id/activity`.)
 
-`nextCursor` is `null` when the last page has been returned.
+### `GET /audit/actors`
+Distinct actors appearing in this org's audit scope, for the filter dropdown (so it is not limited to the currently-loaded page). Same RBAC (`owner`/`admin`/`auditor`) and same scope as `GET /audit`.
+
+Response 200:
+```json
+{ "actors": [ { "userId": "uuid", "email": "string" }, ... ] }
+```
+- `DISTINCT` on `(actorUserId, actorEmail)` within the audit scope. Rows with a null `actorUserId`/`actorEmail` are excluded. Ordered by `email` ASC, capped at 500.
+- Non-admin → `403`.
 
 ## Endpoints — One-time sends
 
@@ -1492,15 +1963,21 @@ Request:
   "content": "the secret string",
   "expiresInMinutes": 60,
   "maxViews": 1,
-  "password": "optional"
+  "password": "optional",
+  "itemId": "optional-uuid-of-source-item"
 }
 ```
 - `content`: 1–32768 chars, required.
 - `expiresInMinutes`: 1–10080 (max 7 days), required.
 - `maxViews`: 1–100, optional (default 1).
 - `password`: 6–256 chars, optional. When provided, the reveal endpoint requires the same value.
+- `itemId`: uuid, optional. The vault item this send was created **from**. When provided, the backend re-verifies the caller's access to that item server-side and, if accessible AND the item's vault org matches the send's active-org context, attributes the **create** audit event to the item so it appears in `GET /items/:id/activity` (see below). Omitting it (or passing an item the caller cannot reach / in another org) is fully backward-compatible — the create event stays send-scoped. The send is created either way (never a 403, never an existence leak for an inaccessible item).
 
 Rate limit: 10 / minute / user.
+
+**Audit attribution of the create event:**
+- `itemId` omitted, or provided-but-inaccessible / cross-org → `action: "send.create"`, `targetType: "send"`, `targetId: <send id>`, `metadata: { maxViews, expiresInMinutes, hasPassword }`. (Unchanged legacy behavior.)
+- `itemId` valid + accessible + same org → `action: "send.create"`, `targetType: "item"`, `targetId: <item id>`, `targetName: <item.name>` (empty string for a v2/ZK item — the activity UI renders actor+action, not the name), `metadata: { sendId: <send id>, maxViews, expiresInMinutes, hasPassword }`. This is the only send event that is item-attributed — the **lifecycle** events (`send.burn`, `send.view`, `send.view_and_burn`, `send.reveal_deferred`, `send.reveal_failed`) stay send-scoped.
 
 Response 201:
 ```json

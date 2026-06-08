@@ -91,7 +91,7 @@ describe("Item types + secret-at-rest (integration)", () => {
     });
     await deps.db.insert(deps.orgMembers).values({ orgId, userId, role: orgRole });
     userIds.push(userId);
-    const { token } = await deps.createSession(userId);
+    const { token } = await deps.createSession(userId, {}, true);
     return { userId, cookie: `${deps.SESSION_COOKIE_NAME}=${token}` };
   }
 
@@ -123,7 +123,14 @@ describe("Item types + secret-at-rest (integration)", () => {
     for (const type of ALL_TYPES) {
       const res = await req(`/vaults/${vaultId}/items`, u.cookie, {
         method: "POST",
-        body: JSON.stringify({ type, name: `${type}-item` }),
+        // v2 (ZK) vault: name MUST arrive as ciphertext (server-side ZK
+        // enforcement). Send "" plaintext + a nameCiphertext blob.
+        body: JSON.stringify({
+          type,
+          name: "",
+          nameCiphertext: Buffer.from(`${type}-item`).toString("base64"),
+          nameIv: Buffer.from("name-iv-aaaaa").toString("base64"),
+        }),
       });
       expect(res.status, `create ${type}`).toBe(201);
       const body = (await res.json()) as { item: { type: string } };
@@ -131,44 +138,48 @@ describe("Item types + secret-at-rest (integration)", () => {
     }
   });
 
-  it("encrypts type-specific secrets at rest (no plaintext in ciphertext columns)", async () => {
+  it("stores client ciphertext verbatim and reveals it (zero-knowledge, no server plaintext)", async () => {
     const u = await makeUser("member");
     const vaultId = await makeVault(u.userId);
     await addVaultMember(vaultId, u.userId, "manager");
 
-    // Mirror the client wire shape: primary secret → password; type-specific
-    // secrets (card number/CVV here) live inside the notes meta blob.
-    const CARD_NUMBER = "4242424242424242";
-    const CVV = "999";
-    const API_KEY = "sk_live_SUPERSECRETVALUE_zzz";
-    const notesBlob = `__WOXA_META__:${JSON.stringify({
-      displayKind: "card",
-      card: { cardNumber: CARD_NUMBER, cvv: CVV },
-    })}`;
+    // Zero-knowledge wire shape: the client encrypts the primary secret + the
+    // type-specific meta blob (card number/CVV) under the vault key and sends
+    // OPAQUE ciphertext. The server never sees plaintext — it stores and returns
+    // the blobs verbatim. We use recognizable base64 so we can assert round-trip.
+    const PW_CT = Buffer.from("opaque-primary-secret-blob").toString("base64");
+    const PW_IV = Buffer.from("pw-iv-aaaaaaa").toString("base64");
+    const NOTES_CT = Buffer.from("opaque-card-meta-blob").toString("base64");
+    const NOTES_IV = Buffer.from("notes-iv-aaaa").toString("base64");
 
     const res = await req(`/vaults/${vaultId}/items`, u.cookie, {
       method: "POST",
-      body: JSON.stringify({ type: "card", name: "Corp Amex", password: API_KEY, notes: notesBlob }),
+      body: JSON.stringify({
+        type: "card",
+        name: "",
+        nameCiphertext: Buffer.from("Corp Amex").toString("base64"),
+        nameIv: Buffer.from("name-iv-aaaaa").toString("base64"),
+        passwordCiphertext: PW_CT,
+        passwordIv: PW_IV,
+        notesCiphertext: NOTES_CT,
+        notesIv: NOTES_IV,
+      }),
     });
     expect(res.status).toBe(201);
     const created = ((await res.json()) as { item: { id: string } }).item;
 
-    // Inspect the raw row: ciphertext columns must NOT contain the plaintext.
+    // Raw row: ciphertext columns hold the EXACT client blobs; no server-side
+    // DEK is wrapped (the key hierarchy lives client-side in ZK mode).
     const row = await deps.db.query.items.findFirst({ where: deps.eq(deps.items.id, created.id) });
     expect(row).toBeTruthy();
-    const pwHex = row!.passwordCiphertext!.toString("latin1");
-    const notesHex = row!.notesCiphertext!.toString("latin1");
-    expect(pwHex).not.toContain(API_KEY);
-    expect(notesHex).not.toContain(CARD_NUMBER);
-    expect(notesHex).not.toContain(CVV);
-    expect(notesHex).not.toContain("cardNumber"); // even the meta keys are encrypted
-    // DEK is wrapped, present.
-    expect(row!.dekCiphertext).toBeTruthy();
+    expect(row!.passwordCiphertext!.toString("base64")).toBe(PW_CT);
+    expect(row!.notesCiphertext!.toString("base64")).toBe(NOTES_CT);
+    expect(row!.dekCiphertext).toBeNull();
 
-    // Owner reveal returns the real primary secret.
+    // Owner reveal returns the ciphertext blob for the client to decrypt.
     const reveal = await req(`/items/${created.id}/password`, u.cookie);
     expect(reveal.status).toBe(200);
-    expect(((await reveal.json()) as { password: string | null }).password).toBe(API_KEY);
+    expect(((await reveal.json()) as { passwordCiphertext: string }).passwordCiphertext).toBe(PW_CT);
   });
 
   it("viewer cannot reveal a non-login type's secret (same gate as password)", async () => {
@@ -180,7 +191,13 @@ describe("Item types + secret-at-rest (integration)", () => {
 
     const res = await req(`/vaults/${vaultId}/items`, owner.cookie, {
       method: "POST",
-      body: JSON.stringify({ type: "ssh", name: "Prod SSH", password: "-----BEGIN PRIVATE KEY-----xyz" }),
+      body: JSON.stringify({
+        type: "ssh",
+        name: "",
+        nameCiphertext: Buffer.from("Prod SSH").toString("base64"),
+        nameIv: Buffer.from("name-iv-aaaaa").toString("base64"),
+        password: "-----BEGIN PRIVATE KEY-----xyz",
+      }),
     });
     const itemId = ((await res.json()) as { item: { id: string } }).item.id;
 

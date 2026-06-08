@@ -1,19 +1,21 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { db } from "@/db/client";
-import { auditEvents, teamMembers, teams, users, vaultMembers, vaultTeamMembers, vaultKeys, vaults } from "@/db/schema";
+import { auditEvents, teamMembers, teams, userKeys, users, vaultMembers, vaultTeamMembers, vaultKeys, vaults } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
-import { getOrgMembership } from "@/lib/orgAccess";
+import { canManageOrgMembers, getOrgMembership } from "@/lib/orgAccess";
 import { createNotification } from "@/lib/notifications";
+import { revokeVaultKeyAndFlag } from "@/lib/rekey";
 import { jsonValidator, paramValidator } from "@/lib/validator";
 import {
   activeOrgForContext,
   blockGuestWrites,
   requireAuth,
   requireTwoFactorEnrolled,
+  requireVaultUnlocked,
   type AuthVariables,
 } from "@/middleware/auth";
 import { loadVaultForUser, type Role } from "@/routes/vaults";
@@ -208,6 +210,98 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
   })
 
   // ------------------------------------------------------------------
+  // List EFFECTIVE member public keys for vault re-key / migration
+  // (AC-024.5, Wave-3b). The client wraps the new vault key for every
+  // member who can decrypt the vault, so it needs each member's X25519
+  // public key. Returns the UNION of:
+  //   * direct vault_members
+  //   * users who hold the vault via a team grant (vault_team_members)
+  // deduped by userId. publicKey=null => member has NOT enrolled ZK yet;
+  // the client warns they will lose access after the migrate/rekey.
+  //
+  // Threat model
+  //   Asset: roster of vault members + their X25519 PUBLIC keys. Public
+  //     keys are non-secret by design (they only wrap, never unwrap), but
+  //     the roster + email mapping is sensitive (org membership leak).
+  //   Adversaries:
+  //     * Lower-privileged member enumerating who can read a vault, or
+  //       harvesting the org roster. Mitigated: RBAC below restricts to
+  //       the principals who actually drive a re-key — org owner/admin OR
+  //       a vault manager. A non-manager member/editor/viewer gets 403.
+  //     * Cross-tenant access via guessed vault UUID. Mitigated: the vault
+  //       is resolved within the caller's ACTIVE org; an id outside it (or
+  //       a soft-deleted vault) collapses to 404 (anti-enumeration — never
+  //       403 for an out-of-scope id).
+  //   Residual risk: an admin who is NOT a vault member can read the
+  //     roster + public keys. Accepted — admins drive org-wide migrations
+  //     and public keys carry no decryption power on their own.
+  // ------------------------------------------------------------------
+  .get("/:id/member-keys", paramValidator(vaultParam), async (c) => {
+    const user = c.get("user")!;
+    const { id } = c.req.valid("param");
+
+    const activeOrg = await activeOrgForContext(c);
+    if (!activeOrg) throw errors.notFound("Vault not found");
+
+    // Resolve the vault inside the caller's active org; out-of-scope or
+    // soft-deleted ids collapse to 404 (anti-enumeration).
+    const [vault] = await db
+      .select({ id: vaults.id, orgId: vaults.orgId })
+      .from(vaults)
+      .where(and(eq(vaults.id, id), isNull(vaults.deletedAt)))
+      .limit(1);
+    if (!vault || vault.orgId !== activeOrg.orgId) {
+      throw errors.notFound("Vault not found");
+    }
+
+    // RBAC: org owner/admin OR a vault manager (the principals who run a
+    // migrate/rekey). Everyone else → 403.
+    const access = await loadVaultForUser(id, user.id);
+    const isVaultManager = access?.role === "manager";
+    if (!canManageOrgMembers(activeOrg.role) && !isVaultManager) {
+      throw errors.forbidden("Only workspace admins or vault managers can list member keys");
+    }
+
+    // Direct vault members.
+    const directRows = await db
+      .select({
+        userId: vaultMembers.userId,
+        email: users.email,
+        publicKey: userKeys.publicKey,
+      })
+      .from(vaultMembers)
+      .innerJoin(users, eq(users.id, vaultMembers.userId))
+      .leftJoin(userKeys, eq(userKeys.userId, users.id))
+      .where(eq(vaultMembers.vaultId, id));
+
+    // Team-derived members (users in any team that has a grant on this vault).
+    const teamRows = await db
+      .select({
+        userId: teamMembers.userId,
+        email: users.email,
+        publicKey: userKeys.publicKey,
+      })
+      .from(vaultTeamMembers)
+      .innerJoin(teamMembers, eq(teamMembers.teamId, vaultTeamMembers.teamId))
+      .innerJoin(users, eq(users.id, teamMembers.userId))
+      .leftJoin(userKeys, eq(userKeys.userId, users.id))
+      .where(eq(vaultTeamMembers.vaultId, id));
+
+    // Dedupe by userId (a user may be both a direct member and in a team).
+    const byUser = new Map<string, { userId: string; email: string; publicKey: string | null }>();
+    for (const r of [...directRows, ...teamRows]) {
+      if (byUser.has(r.userId)) continue;
+      byUser.set(r.userId, {
+        userId: r.userId,
+        email: r.email,
+        publicKey: r.publicKey ? r.publicKey.toString("base64") : null,
+      });
+    }
+
+    return c.json({ memberKeys: [...byUser.values()] });
+  })
+
+  // ------------------------------------------------------------------
   // Add an individual member
   // ------------------------------------------------------------------
   .post("/:id/members", paramValidator(vaultParam), jsonValidator(createSchema), async (c) => {
@@ -255,7 +349,7 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "vault",
         targetId: id,
         targetName: access.vault.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { 
@@ -320,7 +414,7 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "vault",
         targetId: id,
         targetName: access.vault.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { granteeTeamId: body.teamId, granteeTeamName: team.name, role: body.role },
@@ -376,7 +470,7 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: access.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "vault.role_change", targetType: "vault", targetId: id, targetName: access.vault.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { granteeUserId: userId, granteeEmail: target.email, from: target.role, to: role },
       });
       await createNotification(tx, {
@@ -413,7 +507,7 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: access.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "vault.team_role_change", targetType: "vault", targetId: id, targetName: access.vault.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { granteeTeamId: teamId, granteeTeamName: target.teamName, from: target.role, to: role },
       });
 
@@ -435,7 +529,10 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
   // ------------------------------------------------------------------
   // Remove an individual member
   // ------------------------------------------------------------------
-  .delete("/:id/members/:userId", paramValidator(vaultUserParam), async (c) => {
+  // HIGH finding: revoking a vault member is destructive (cuts access + flags
+  // rekey). Gate with `requireVaultUnlocked` so a stolen cookie cannot strip
+  // membership without the master password.
+  .delete("/:id/members/:userId", requireVaultUnlocked, paramValidator(vaultUserParam), async (c) => {
     const user = c.get("user")!;
     const { id, userId } = c.req.valid("param");
 
@@ -460,9 +557,28 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: access.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "vault.revoke", targetType: "vault", targetId: id, targetName: access.vault.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { revokedUserId: userId, revokedEmail: target.email, role: target.role },
       });
+
+      // AC-024.5 — on a v2 (ZK) vault, cut the removed member's server-side
+      // access (delete their wrapped key) and flag rekey_pending so an admin
+      // re-keys the vault + re-encrypts items (client-driven). No-op for v1.
+      await revokeVaultKeyAndFlag(
+        tx,
+        {
+          orgId: access.vault.orgId,
+          actorUserId: user.id,
+          actorEmail: user.email,
+          ...clientIpAuditFields(c),
+          userAgent: c.req.header("user-agent") ?? null,
+        },
+        id,
+        userId,
+        access.vault.name,
+        access.vault.encryptionVersion,
+      );
+
       await createNotification(tx, {
         userId, orgId: access.vault.orgId, type: "access.revoked", actorUserId: user.id, actorEmail: user.email,
         targetType: "vault", targetId: id, targetName: access.vault.name,
@@ -476,7 +592,7 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
   // ------------------------------------------------------------------
   // Remove a team
   // ------------------------------------------------------------------
-  .delete("/:id/team-members/:teamId", paramValidator(vaultTeamParam), async (c) => {
+  .delete("/:id/team-members/:teamId", requireVaultUnlocked, paramValidator(vaultTeamParam), async (c) => {
     const user = c.get("user")!;
     const { id, teamId } = c.req.valid("param");
 
@@ -494,7 +610,7 @@ export const vaultMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: access.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "vault.team_revoke", targetType: "vault", targetId: id, targetName: access.vault.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { revokedTeamId: teamId, revokedTeamName: target.teamName, role: target.role },
       });
 

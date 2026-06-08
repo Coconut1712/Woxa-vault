@@ -18,7 +18,26 @@ import {
   ChevronDown,
   Check,
   Send,
+  RotateCw,
+  Loader2,
+  GripVertical,
 } from "lucide-react";
+import {
+  DndContext,
+  PointerSensor,
+  KeyboardSensor,
+  useSensor,
+  useSensors,
+  closestCenter,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { toast } from "sonner";
 
 import { Topbar } from "@/components/layout/topbar";
@@ -50,6 +69,9 @@ import { EditVaultDialog } from "@/components/vault/edit-vault-dialog";
 import { EditFolderDialog } from "@/components/vault/edit-folder-dialog";
 import { MemberAvatars } from "@/components/vault/member-avatars";
 import { EditItemDialog } from "@/components/vault/edit-item-dialog";
+import { RotationBadge } from "@/components/vault/rotation-badge";
+import { MigrateRekeyDialog } from "@/components/vault/migrate-rekey-dialog";
+import { DeleteWithPasswordDialog } from "@/components/shared/delete-with-password-dialog";
 import {
   ApiErrorState,
   ApiLoadingState,
@@ -62,6 +84,7 @@ import {
   getItemPassword,
   listDisplayItems,
   toggleFavorite,
+  VaultLockedError,
   type DisplayItemFull,
   type DisplayItemSummary,
 } from "@/lib/items-overlay";
@@ -69,6 +92,7 @@ import { ApiError, VAULT_UNLOCKED_EVENT } from "@/lib/api/client";
 import type { Vault, VaultMember, VaultRole } from "@/lib/api/types";
 import { useVaults } from "@/lib/vaults/provider";
 import { useFolders, type Folder } from "@/lib/folders/provider";
+import { useVaultLock } from "@/components/vault-lock/lock-provider";
 import { useT } from "@/lib/i18n/provider";
 import { useAuth } from "@/lib/auth/provider";
 import {
@@ -99,7 +123,8 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
   const searchParams = useSearchParams();
   const tr = useT();
   const { me } = useAuth();
-  const { refresh: refreshVaults } = useVaults();
+  const { vaults, refresh: refreshVaults } = useVaults();
+  const { getVaultKey } = useVaultLock();
   const { byVault, remove: removeFolder, isLoading: isFoldersLoading } = useFolders();
 
   const [vault, setVault] = useState<Vault | null>(null);
@@ -129,7 +154,17 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
   const [editFolderId, setEditFolderId] = useState<string | null>(null);
   const [deletingFolderBusy, setDeletingFolderBusy] = useState(false);
 
+  // Phase C — crypto rotation. `rekeyOpen` opens the rekey dialog; `rekeyVaultKey`
+  // is the current vault key passed to it (null while loading or locked).
+  const [rekeyOpen, setRekeyOpen] = useState(false);
+  const [rekeyVaultKey, setRekeyVaultKey] = useState<Uint8Array | null>(null);
+
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [quickDeleteItem, setQuickDeleteItem] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [quickDeleteBusy, setQuickDeleteBusy] = useState(false);
 
   const toggleSelect = (itemId: string) => {
     setSelectedIds((prev) =>
@@ -181,7 +216,15 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
     setLoadingItems(true);
     setItemsError(null);
     try {
-      const next = await listDisplayItems(id);
+      // v2 (ZK) vault: fetch the vault key so list rows can decrypt their
+      // name/username/url ciphertext. A locked vault yields null → rows render
+      // the 🔒 placeholder and refresh on unlock (VAULT_UNLOCKED_EVENT below).
+      const targetVault = vaults.find((v) => v.id === id);
+      const vaultKey =
+        targetVault?.encryptionVersion === 2
+          ? await getVaultKey(id)
+          : undefined;
+      const next = await listDisplayItems(id, undefined, vaultKey ?? undefined);
       setItems(next);
     } catch (err) {
       if (err instanceof ApiError) setItemsError(err);
@@ -189,7 +232,7 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
     } finally {
       setLoadingItems(false);
     }
-  }, [id]);
+  }, [id, vaults, getVaultKey]);
 
   useEffect(() => {
     void loadVault();
@@ -232,10 +275,17 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
 
   const handleToggleFavorite = async (itemId: string) => {
     try {
+      // v2 (ZK) vault: persisting a favorite re-encrypts the notes meta blob, so
+      // fetch the vault key. A locked vault yields null → toggleFavorite throws
+      // VaultLockedError and we prompt the user to unlock.
+      const targetVault = vaults.find((v) => v.id === id);
+      const vaultKey =
+        targetVault?.encryptionVersion === 2 ? await getVaultKey(id) : null;
       // Guests may favorite, but read-only: persist client-side only (no
       // PATCH /items, which the backend blocks for them).
       const next = await toggleFavorite(itemId, {
         persist: canWriteVaultData(me?.role ?? null),
+        vaultKey,
       });
       setItems((prev) =>
         prev.map((p) =>
@@ -245,23 +295,39 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
         ),
       );
     } catch (err) {
+      if (err instanceof VaultLockedError) {
+        toast.error(tr("item.favorite_locked"), {
+          description: tr("item.favorite_locked_desc"),
+        });
+        return;
+      }
       const description =
         err instanceof ApiError ? err.message : tr("api.error.generic");
       toast.error(tr("api.error.save_failed"), { description });
     }
   };
 
-  const handleQuickDelete = async (itemId: string, name: string) => {
-    if (!window.confirm(tr("item.delete.desc", { name }))) return;
+  const handleQuickDelete = (itemId: string, name: string) => {
+    setQuickDeleteItem({ id: itemId, name });
+  };
+
+  const handleConfirmQuickDelete = async () => {
+    if (!quickDeleteItem || quickDeleteBusy) return;
+    setQuickDeleteBusy(true);
     try {
-      await deleteDisplayItem(itemId);
-      toast.success(tr("item.deleted_toast"), { description: name });
+      await deleteDisplayItem(quickDeleteItem.id);
+      toast.success(tr("item.deleted_toast"), {
+        description: quickDeleteItem.name,
+      });
+      setQuickDeleteItem(null);
       await loadItems();
       await refreshVaults();
     } catch (err) {
       const description =
         err instanceof ApiError ? err.message : tr("api.error.generic");
       toast.error(tr("api.error.delete_failed"), { description });
+    } finally {
+      setQuickDeleteBusy(false);
     }
   };
 
@@ -309,6 +375,15 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
     } finally {
       setDeletingFolderBusy(false);
     }
+  };
+
+  // Open the rekey dialog (vault key rotation). Needs the CURRENT vault key to
+  // decrypt items; fetch it first. A locked vault yields null → the dialog
+  // blocks with an "unlock first" hint rather than crashing.
+  const openRekey = async () => {
+    const key = await getVaultKey(id);
+    setRekeyVaultKey(key);
+    setRekeyOpen(true);
   };
 
   if (loadingVault) {
@@ -367,6 +442,12 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
     (vault.role === "manager" || vault.role === "editor") && canWrite;
   const vaultColor = vault.color ?? "violet";
   const c = colorFor(vaultColor);
+
+  // Phase C crypto-rotation gate. Re-key rotates the vault key after a member is
+  // revoked → owner/admin OR vault manager.
+  const isOrgAdmin = role === "owner" || role === "admin";
+  const canRekey = canWrite && (isOrgAdmin || vault.role === "manager");
+  const rekeyPending = vault.rekeyPending === true;
 
   const filtered = items.filter((item) => {
     if (showFavoritesOnly && !item.displayFavorite) return false;
@@ -435,14 +516,12 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
                 <h1 className="text-xl font-semibold tracking-tight">
                   {vault.name}
                 </h1>
-                {vault.encryptionVersion >= 2 && (
-                  <Badge
-                    variant="outline"
-                    className="text-[10px] border-emerald-500/30 dark:border-emerald-500/20 bg-emerald-500/15 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 gap-1"
-                  >
-                    <ShieldCheck className="size-2.5" /> {tr("vault.zk_badge")}
-                  </Badge>
-                )}
+                <Badge
+                  variant="outline"
+                  className="text-[10px] border-emerald-500/30 dark:border-emerald-500/20 bg-emerald-500/15 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 gap-1"
+                >
+                  <ShieldCheck className="size-2.5" /> {tr("vault.zk_badge")}
+                </Badge>
                 <Badge
                   variant="outline"
                   className="text-[10px] border-line-2 bg-surface-1 text-foreground/70 gap-1"
@@ -462,6 +541,32 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
               </div>
             </div>
           </div>
+
+          {/* Phase C — re-key needed notice (a member was revoked). */}
+          {rekeyPending && canRekey ? (
+            <div className="max-w-6xl mx-auto mt-4">
+              <div className="flex items-start justify-between gap-3 rounded-xl border border-amber-500/30 dark:border-amber-500/20 bg-amber-500/15 dark:bg-amber-500/10 px-4 py-3">
+                <div className="flex items-start gap-3 min-w-0">
+                  <RotateCw className="size-4 mt-0.5 shrink-0 text-amber-700 dark:text-amber-400" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-amber-700 dark:text-amber-400">
+                      {tr("rekey.banner_title")}
+                    </p>
+                    <p className="text-xs text-amber-700/80 dark:text-amber-400/80 mt-0.5">
+                      {tr("rekey.banner_desc")}
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => void openRekey()}
+                  className="shrink-0 bg-amber-600 text-white hover:bg-amber-600/90"
+                >
+                  <RotateCw className="size-3.5" /> {tr("rekey.banner_cta")}
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </div>
 
         {/* Action bar — single row: search, folder filter, active pills, new item, vault menu */}
@@ -477,17 +582,32 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
               />
             </div>
 
-            <FolderFilterDropdown
-              folders={folders}
-              activeFolderId={activeFolderId}
-              showUncategorized={showUncategorized}
-              uncategorizedCount={uncategorizedCount}
-              totalCount={items.length}
-              folderItemCount={folderItemCount}
-              canEdit={canEdit}
-              onSelect={(value) => updateFilter("folder", value)}
-              onCreate={() => setNewFolderOpen(true)}
-            />
+            <div className="flex items-center gap-1">
+              <FolderFilterDropdown
+                vaultId={id}
+                folders={folders}
+                activeFolderId={activeFolderId}
+                showUncategorized={showUncategorized}
+                uncategorizedCount={uncategorizedCount}
+                totalCount={items.length}
+                folderItemCount={folderItemCount}
+                canEdit={canEdit}
+                onSelect={(value) => updateFilter("folder", value)}
+                onCreate={() => setNewFolderOpen(true)}
+              />
+              {canEdit && (
+                <button
+                  type="button"
+                  onClick={() => setNewFolderOpen(true)}
+                  aria-label={tr("nf.title")}
+                  title={tr("nf.title")}
+                  className="inline-flex items-center gap-1 h-8 px-2.5 rounded-md border border-line-1 bg-surface-1 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-surface-2 transition-colors whitespace-nowrap"
+                >
+                  <Plus className="size-3.5 shrink-0" />
+                  {tr("nf.title")}
+                </button>
+              )}
+            </div>
 
             {/* Folder actions — shown when a real folder is active. Edit/Delete
                 require write; Share requires vault role manager|editor (folder
@@ -614,14 +734,16 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
           ) : (
             <div className="divide-y divide-border">
               <div className="flex items-center gap-3 px-8 py-2 bg-muted/20 border-b border-border/50">
-                <div className="flex items-center gap-3 w-10 shrink-0">
-                  <Checkbox 
-                    checked={filtered.length > 0 && selectedIds.length === filtered.length}
-                    onCheckedChange={selectAllVisible}
-                  />
-                </div>
+                {canEdit && (
+                  <div className="flex items-center gap-3 w-10 shrink-0">
+                    <Checkbox
+                      checked={filtered.length > 0 && selectedIds.length === filtered.length}
+                      onCheckedChange={selectAllVisible}
+                    />
+                  </div>
+                )}
                 <div className="flex-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-                  {filtered.length} Items
+                  {tr("vault.items_count", { n: filtered.length })}
                 </div>
               </div>
               {filtered.map((item) => {
@@ -654,12 +776,14 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
                       selectedIds.includes(item.id) && "bg-brand/5"
                     )}
                   >
-                    <div className="flex items-center gap-3 w-10 shrink-0">
-                      <Checkbox 
-                        checked={selectedIds.includes(item.id)}
-                        onCheckedChange={() => toggleSelect(item.id)}
-                      />
-                    </div>
+                    {canEdit && (
+                      <div className="flex items-center gap-3 w-10 shrink-0">
+                        <Checkbox
+                          checked={selectedIds.includes(item.id)}
+                          onCheckedChange={() => toggleSelect(item.id)}
+                        />
+                      </div>
+                    )}
                     <Link
                       href={`/app/item/${item.id}`}
                       className="flex items-center gap-3 flex-1 min-w-0"
@@ -677,6 +801,10 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
                           {item.displayFavorite && (
                             <Star className="size-3 fill-amber-500 text-amber-500" />
                           )}
+                          <RotationBadge
+                            status={item.rotationStatus}
+                            dueAt={item.rotationDueAt}
+                          />
                           {folderForItem && (
                             <Badge
                               variant="outline"
@@ -796,7 +924,7 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
                               <DropdownMenuItem
                                 variant="destructive"
                                 onClick={() =>
-                                  void handleQuickDelete(item.id, item.name)
+                                  handleQuickDelete(item.id, item.name)
                                 }
                               >
                                 <Trash2 className="size-3.5" />
@@ -879,8 +1007,8 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
         />
       )}
 
-      {selectedIds.length > 0 && (
-        <BulkActionsBar 
+      {canEdit && selectedIds.length > 0 && (
+        <BulkActionsBar
           selectedIds={selectedIds}
           vaultId={id}
           onClear={() => setSelectedIds([])}
@@ -926,57 +1054,69 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
           );
         })()}
 
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+      {rekeyOpen && (
+        <MigrateRekeyDialog
+          open={rekeyOpen}
+          onOpenChange={setRekeyOpen}
+          vaultId={vault.id}
+          vaultName={vault.name}
+          keyVersion={vault.keyVersion ?? 1}
+          oldVaultKey={rekeyVaultKey}
+          onDone={async () => {
+            setRekeyOpen(false);
+            await loadVault();
+            await loadItems();
+            await refreshVaults();
+          }}
+        />
+      )}
+
+      <DeleteWithPasswordDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        title={tr("vault.delete.title")}
+        description={tr("vault.delete.desc", { name: vault.name })}
+        confirmLabel={tr("vault.delete.button")}
+        onConfirmed={handleDelete}
+      />
+
+      <Dialog
+        open={quickDeleteItem !== null}
+        onOpenChange={(o) => !o && setQuickDeleteItem(null)}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{tr("vault.delete.title")}</DialogTitle>
+            <DialogTitle>{tr("item.delete.title")}</DialogTitle>
             <DialogDescription>
-              {tr("vault.delete.desc", { name: vault.name })}
+              {tr("item.delete.desc", { name: quickDeleteItem?.name ?? "" })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+            <Button variant="outline" onClick={() => setQuickDeleteItem(null)} disabled={quickDeleteBusy}>
               {tr("common.cancel")}
             </Button>
             <Button
               className="bg-rose-500 text-white hover:bg-rose-500/90"
-              onClick={handleDelete}
+              onClick={() => void handleConfirmQuickDelete()}
+              disabled={quickDeleteBusy}
             >
-              <Trash2 className="size-3.5" /> {tr("vault.delete.button")}
+              <Trash2 className="size-3.5" /> {tr("item.delete.button")}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog
+      <DeleteWithPasswordDialog
         open={!!deleteFolderId}
         onOpenChange={(o) => !o && setDeleteFolderId(null)}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{tr("folder.delete.title")}</DialogTitle>
-            <DialogDescription>
-              {tr("folder.delete.desc", {
-                name: folders.find((f) => f.id === deleteFolderId)?.name ?? "",
-              })}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setDeleteFolderId(null)}
-            >
-              {tr("common.cancel")}
-            </Button>
-            <Button
-              className="bg-rose-500 text-white hover:bg-rose-500/90"
-              onClick={handleConfirmDeleteFolder}
-            >
-              <Trash2 className="size-3.5" /> {tr("folder.delete.button")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        title={tr("folder.delete.title")}
+        description={tr("folder.delete.desc", {
+          name: folders.find((f) => f.id === deleteFolderId)?.name ?? "",
+        })}
+        confirmLabel={tr("folder.delete.button")}
+        busy={deletingFolderBusy}
+        onConfirmed={handleConfirmDeleteFolder}
+      />
     </>
   );
 }
@@ -985,6 +1125,7 @@ function VaultPage({ params }: { params: Promise<{ id: string }> }) {
    FOLDER FILTER DROPDOWN — single-button folder picker in the action bar
    ===================================================================== */
 type FolderFilterProps = {
+  vaultId: string;
   folders: Folder[];
   activeFolderId: string | null;
   showUncategorized: boolean;
@@ -997,6 +1138,7 @@ type FolderFilterProps = {
 };
 
 function FolderFilterDropdown({
+  vaultId,
   folders,
   activeFolderId,
   showUncategorized,
@@ -1008,6 +1150,28 @@ function FolderFilterDropdown({
   onCreate,
 }: FolderFilterProps) {
   const tr = useT();
+  const { reorder } = useFolders();
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+
+  const handleDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const ids = folders.map((folder) => folder.id);
+    const from = ids.indexOf(String(active.id));
+    const to = ids.indexOf(String(over.id));
+    if (from === -1 || to === -1) return;
+    const next = [...ids];
+    next.splice(to, 0, next.splice(from, 1)[0]);
+    void reorder(vaultId, next).catch(() => {
+      toast.error(tr("api.error.save_failed"));
+    });
+  };
+
   const isFiltered = Boolean(activeFolderId);
   const activeFolder = activeFolderId && activeFolderId !== "__none__"
     ? folders.find((f) => f.id === activeFolderId)
@@ -1050,47 +1214,78 @@ function FolderFilterDropdown({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">
         <DropdownMenuGroup>
-          <DropdownMenuItem onClick={() => onSelect(null)}>
+          <DropdownMenuItem
+            onClick={() => onSelect(null)}
+            className={cn(!activeFolderId && "bg-brand/8 dark:bg-brand/10")}
+          >
             <Check
               className={cn(
-                "size-3.5",
-                !activeFolderId ? "opacity-100" : "opacity-0",
+                "size-3.5 shrink-0",
+                !activeFolderId ? "opacity-100 text-brand" : "opacity-0",
               )}
             />
-            <FolderIcon className="size-3.5 text-muted-foreground" />
+            <FolderIcon className="size-3.5 text-muted-foreground shrink-0" />
             <span className="flex-1">{tr("folder.all_items")}</span>
-            <span className="text-[10px] text-muted-foreground tabular-nums">
-              {totalCount}
-            </span>
+            {totalCount > 0 && (
+              <span className="text-[10px] tabular-nums bg-surface-2 text-muted-foreground px-1.5 py-0.5 rounded-full">
+                {totalCount}
+              </span>
+            )}
           </DropdownMenuItem>
         </DropdownMenuGroup>
 
         {folders.length > 0 && (
           <DropdownMenuGroup>
-            {folders.map((f) => (
-              <FolderFilterRow
-                key={f.id}
-                active={activeFolderId === f.id}
-                folder={f}
-                count={folderItemCount(f.id)}
-                onSelect={() => onSelect(f.id)}
-              />
-            ))}
+            {canEdit ? (
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleDragEnd}
+              >
+                <SortableContext
+                  items={folders.map((folder) => folder.id)}
+                  strategy={verticalListSortingStrategy}
+                >
+                  {folders.map((f) => (
+                    <SortableFolderFilterRow
+                      key={f.id}
+                      active={activeFolderId === f.id}
+                      folder={f}
+                      count={folderItemCount(f.id)}
+                      onSelect={() => onSelect(f.id)}
+                    />
+                  ))}
+                </SortableContext>
+              </DndContext>
+            ) : (
+              folders.map((f) => (
+                <FolderFilterRow
+                  key={f.id}
+                  active={activeFolderId === f.id}
+                  folder={f}
+                  count={folderItemCount(f.id)}
+                  onSelect={() => onSelect(f.id)}
+                />
+              ))
+            )}
           </DropdownMenuGroup>
         )}
 
         {uncategorizedCount > 0 && (
           <DropdownMenuGroup>
-            <DropdownMenuItem onClick={() => onSelect("__none__")}>
+            <DropdownMenuItem
+              onClick={() => onSelect("__none__")}
+              className={cn(showUncategorized && "bg-brand/8 dark:bg-brand/10")}
+            >
               <Check
                 className={cn(
-                  "size-3.5",
-                  showUncategorized ? "opacity-100" : "opacity-0",
+                  "size-3.5 shrink-0",
+                  showUncategorized ? "opacity-100 text-brand" : "opacity-0",
                 )}
               />
-              <FolderIcon className="size-3.5 text-muted-foreground" />
+              <FolderIcon className="size-3.5 text-muted-foreground shrink-0" />
               <span className="flex-1">{tr("folder.uncategorized")}</span>
-              <span className="text-[10px] text-muted-foreground tabular-nums">
+              <span className="text-[10px] tabular-nums bg-surface-2 text-muted-foreground px-1.5 py-0.5 rounded-full">
                 {uncategorizedCount}
               </span>
             </DropdownMenuItem>
@@ -1098,12 +1293,15 @@ function FolderFilterDropdown({
         )}
 
         {canEdit && (
-          <DropdownMenuGroup>
-            <DropdownMenuItem onClick={onCreate}>
-              <Plus className="size-3.5" />
-              <span>{tr("nf.title")}</span>
-            </DropdownMenuItem>
-          </DropdownMenuGroup>
+          <>
+            <div className="mx-2 my-1 border-t border-line-1" />
+            <DropdownMenuGroup>
+              <DropdownMenuItem onClick={onCreate} className="text-muted-foreground hover:text-foreground">
+                <Plus className="size-3.5 shrink-0" />
+                <span>{tr("nf.title")}</span>
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
+          </>
         )}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -1122,19 +1320,91 @@ function FolderFilterRow({
   onSelect: () => void;
 }) {
   return (
-    <DropdownMenuItem onClick={onSelect}>
+    <DropdownMenuItem
+      onClick={onSelect}
+      className={cn(active && "bg-brand/8 dark:bg-brand/10")}
+    >
       <Check
-        className={cn("size-3.5", active ? "opacity-100" : "opacity-0")}
+        className={cn("size-3.5 shrink-0", active ? "opacity-100 text-brand" : "opacity-0")}
       />
       <VaultIcon
         name={folder.iconKey ?? "folder"}
-        className={cn("size-3.5", colorFor(folder.color ?? "violet").text)}
+        className={cn("size-3.5 shrink-0", colorFor(folder.color ?? "violet").text)}
       />
       <span className="flex-1 truncate">{folder.name}</span>
-      <span className="text-[10px] text-muted-foreground tabular-nums">
-        {count}
-      </span>
+      {count > 0 && (
+        <span className="text-[10px] tabular-nums bg-surface-2 text-muted-foreground px-1.5 py-0.5 rounded-full">
+          {count}
+        </span>
+      )}
     </DropdownMenuItem>
+  );
+}
+
+/**
+ * Sortable variant of FolderFilterRow (US-011.4). The whole row keeps its
+ * click-to-filter behavior; dragging is initiated only from the GripVertical
+ * handle (revealed on hover) so click and drag coexist. The handle carries the
+ * dnd-kit listeners + keyboard attributes for accessible reordering.
+ */
+function SortableFolderFilterRow({
+  active,
+  folder,
+  count,
+  onSelect,
+}: {
+  active: boolean;
+  folder: Folder;
+  count: number;
+  onSelect: () => void;
+}) {
+  const tr = useT();
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: folder.id });
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={cn("group/folder flex items-stretch", isDragging && "z-10 opacity-80")}
+    >
+      <DropdownMenuItem
+        onClick={onSelect}
+        className={cn("flex-1 min-w-0", active && "bg-brand/8 dark:bg-brand/10")}
+      >
+        <Check
+          className={cn("size-3.5 shrink-0", active ? "opacity-100 text-brand" : "opacity-0")}
+        />
+        <VaultIcon
+          name={folder.iconKey ?? "folder"}
+          className={cn("size-3.5 shrink-0", colorFor(folder.color ?? "violet").text)}
+        />
+        <span className="flex-1 truncate">{folder.name}</span>
+        {count > 0 && (
+          <span className="text-[10px] tabular-nums bg-surface-2 text-muted-foreground px-1.5 py-0.5 rounded-full">
+            {count}
+          </span>
+        )}
+      </DropdownMenuItem>
+      {/* Grip handle: always reserves space so the count is never overlapped.
+          Visible only on hover/focus — opacity-0 keeps it out of sight without
+          collapsing the column that protects the count. */}
+      <button
+        type="button"
+        aria-label={tr("folder.reorder_aria", { name: folder.name })}
+        className="px-1.5 flex items-center text-muted-foreground/50 opacity-0 group-hover/folder:opacity-100 focus-visible:opacity-100 hover:text-foreground touch-none cursor-grab active:cursor-grabbing transition-opacity outline-none shrink-0"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="size-3.5" />
+      </button>
+    </div>
   );
 }
 

@@ -10,10 +10,12 @@ import { env } from "@/config/env";
 //     deployment explicitly opted in via `TRUST_PROXY=true`. When trust is
 //     not granted, fall back to the connecting peer's socket address so an
 //     attacker cannot rotate IPs simply by setting a header. The Cloudflare
-//     (`cf-connecting-ip`) and Fly.io (`fly-client-ip`) headers are accepted
-//     unconditionally because those edges set them in their last hop and
-//     cannot be forged through them — but they will still only appear when
-//     the request actually came through that edge.
+//     (`cf-connecting-ip`) and Fly.io (`fly-client-ip`) headers carry meaning
+//     ONLY when the request genuinely transited that edge. When the origin is
+//     reachable directly (no trusted edge in front), an attacker can forge
+//     them just like `X-Forwarded-For`, rotating their rate-limit bucket at
+//     will. They are therefore gated behind `TRUST_PROXY` alongside XFF — the
+//     operator asserts a trusted edge sets them on the last hop.
 //
 // Residual risk:
 //   * "unknown" fallback when no socket info is available — callers must NOT
@@ -47,19 +49,20 @@ function fromSocket(c: IpRequestCtx): string | null {
 }
 
 export function getClientIp(c: IpRequestCtx): string {
-  // Cloudflare and Fly each terminate the connection at their edge and set
-  // their own non-forgeable header naming the original peer. Prefer those
-  // when present regardless of TRUST_PROXY — they are the canonical source
-  // on those platforms.
-  const cf = firstNonEmpty(c.req.header("cf-connecting-ip"));
-  if (cf) return cf;
-
-  const fly = firstNonEmpty(c.req.header("fly-client-ip"));
-  if (fly) return fly;
-
   if (env.TRUST_PROXY) {
-    // Only honor `X-Forwarded-For` / `X-Real-IP` when the operator has
-    // explicitly told us we're behind a trusted proxy chain.
+    // Only honor forwarding headers when the operator has explicitly told us
+    // we're behind a trusted edge/proxy chain. Without that assertion every
+    // one of these can be forged by a client reaching the origin directly,
+    // letting an attacker rotate their rate-limit bucket per request.
+    //
+    // Cloudflare and Fly each terminate the connection at their edge and set
+    // their own header naming the original peer; prefer those first.
+    const cf = firstNonEmpty(c.req.header("cf-connecting-ip"));
+    if (cf) return cf;
+
+    const fly = firstNonEmpty(c.req.header("fly-client-ip"));
+    if (fly) return fly;
+
     const xff = firstNonEmpty(c.req.header("x-forwarded-for"));
     if (xff) return xff;
     const xri = firstNonEmpty(c.req.header("x-real-ip"));

@@ -242,6 +242,7 @@ describe("GET /items/:id/activity (per-item activity) integration", () => {
         "actorUserId",
         "id",
         "ipHash",
+        "ipMasked",
         "metadata",
         "occurredAt",
         "orgId",

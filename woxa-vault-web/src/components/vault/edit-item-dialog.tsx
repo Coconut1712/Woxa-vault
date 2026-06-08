@@ -28,7 +28,11 @@ import { IconTile } from "@/components/icon";
 import { AttachmentsSection } from "@/components/vault/attachments-section";
 import { useVaults } from "@/lib/vaults/provider";
 import { useFolders } from "@/lib/folders/provider";
-import { updateDisplayItem } from "@/lib/items-overlay";
+import { updateDisplayItem, VaultLockedError } from "@/lib/items-overlay";
+import {
+  RotationPolicyField,
+  parseRotationDays,
+} from "@/components/vault/rotation-badge";
 import { useVaultLock } from "@/components/vault-lock/lock-provider";
 import type { DisplayItemFull } from "@/lib/items-overlay";
 import { ApiError } from "@/lib/api/client";
@@ -73,6 +77,10 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
   const [card, setCard] = useState<CardData>(item.card ?? {});
   const [identity, setIdentity] = useState<IdentityData>(item.identity ?? {});
   const [ssh, setSsh] = useState<SshData>(item.ssh ?? {});
+  // US-060 — per-item rotation window (days). Empty = inherit org default.
+  const [rotationDays, setRotationDays] = useState(
+    item.rotationPolicyDays ? String(item.rotationPolicyDays) : "",
+  );
 
   // Re-sync state when the underlying item changes (e.g., reopen after refetch)
   useEffect(() => {
@@ -90,6 +98,9 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
       setCard(item.card ?? {});
       setIdentity(item.identity ?? {});
       setSsh(item.ssh ?? {});
+      setRotationDays(
+        item.rotationPolicyDays ? String(item.rotationPolicyDays) : "",
+      );
     }
   }, [open, item]);
 
@@ -123,6 +134,13 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
         ? await getVaultKey(item.vaultId)
         : undefined;
 
+      // v2 vault requires the vault key to encrypt fields client-side.
+      // If the key is unavailable the vault is locked — block the save so
+      // secrets are never silently dropped or written as plaintext.
+      if (targetVault?.encryptionVersion === 2 && !vaultKey) {
+        throw new VaultLockedError();
+      }
+
       await updateDisplayItem(item, {
         name,
         notes,
@@ -130,6 +148,7 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
         password,
         url,
         meta: nextMeta,
+        rotationPolicyDays: parseRotationDays(rotationDays),
       }, vaultKey ?? undefined);
       toast.success(tr("item.edit_dialog.saved"), {
         description: tr("item.edit_dialog.saved_desc", {
@@ -140,9 +159,15 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
       await onSaved?.();
       onOpenChange(false);
     } catch (err) {
-      const description =
-        err instanceof ApiError ? err.message : tr("api.error.generic");
-      toast.error(tr("api.error.save_failed"), { description });
+      if (err instanceof VaultLockedError) {
+        toast.error(tr("item.edit_dialog.vault_locked"), {
+          description: tr("item.edit_dialog.vault_locked_desc"),
+        });
+      } else {
+        const description =
+          err instanceof ApiError ? err.message : tr("api.error.generic");
+        toast.error(tr("api.error.save_failed"), { description });
+      }
     } finally {
       setSubmitting(false);
     }
@@ -272,6 +297,8 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
                     className="font-mono-secret text-sm"
                   />
                 </FormField>
+
+                <RotationPolicyField value={rotationDays} onChange={setRotationDays} />
               </div>
             </>
           )}
@@ -292,6 +319,7 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
                   showStrength={false}
                 />
               </FormField>
+              <RotationPolicyField value={rotationDays} onChange={setRotationDays} />
             </>
           )}
 
@@ -322,6 +350,7 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
                   className="font-mono-secret text-sm"
                 />
               </FormField>
+              <RotationPolicyField value={rotationDays} onChange={setRotationDays} />
             </>
           )}
 

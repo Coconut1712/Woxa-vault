@@ -1,13 +1,14 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { createHash, randomBytes } from "node:crypto";
 import { encodeBase32LowerCaseNoPadding } from "@oslojs/encoding";
 import { db } from "@/db/client";
-import { auditEvents, invitations, organizations, orgMembers, userKeys, users } from "@/db/schema";
+import { auditEvents, invitations, organizations, orgMembers, userKeys, users, vaultMembers, vaults } from "@/db/schema";
+import { revokeOrgKeysAndFlag } from "@/lib/rekey";
 import { env } from "@/config/env";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { logger } from "@/lib/logger";
 import { redactEmail, sendInviteEmail } from "@/lib/mailer/resend";
@@ -20,7 +21,12 @@ import {
 } from "@/lib/orgAccess";
 import { createNotification } from "@/lib/notifications";
 import { jsonValidator, paramValidator } from "@/lib/validator";
-import { activeOrgForContext, requireAuth, type AuthVariables } from "@/middleware/auth";
+import {
+  activeOrgForContext,
+  requireAuth,
+  requireVaultUnlocked,
+  type AuthVariables,
+} from "@/middleware/auth";
 
 // ---------------------------------------------------------------------------
 // Threat model — workspace member management
@@ -84,7 +90,8 @@ interface OrgMemberDTO {
   displayName: string;
   role: OrgRole;
   joinedAt: string;
-  status: "active" | "disabled" | "invited";
+  lastLoginAt: string | null;
+  status: "active" | "disabled";
 }
 
 interface InvitationDTO {
@@ -128,6 +135,7 @@ async function loadMember(orgId: string, userId: string): Promise<OrgMemberDTO |
       displayName: users.displayName,
       name: users.name,
       status: users.status,
+      lastLoginAt: users.lastLoginAt,
     })
     .from(orgMembers)
     .innerJoin(users, eq(users.id, orgMembers.userId))
@@ -141,6 +149,7 @@ async function loadMember(orgId: string, userId: string): Promise<OrgMemberDTO |
     displayName: r.displayName ?? r.name ?? r.email,
     role: r.role as OrgRole,
     joinedAt: r.joinedAt.toISOString(),
+    lastLoginAt: r.lastLoginAt ? r.lastLoginAt.toISOString() : null,
     status: r.status === "active" ? "active" : "disabled",
   };
 }
@@ -171,6 +180,7 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
         displayName: users.displayName,
         name: users.name,
         status: users.status,
+        lastLoginAt: users.lastLoginAt,
         publicKey: userKeys.publicKey,
       })
       .from(orgMembers)
@@ -185,6 +195,7 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
       displayName: r.displayName ?? r.name ?? r.email,
       role: r.role as OrgRole,
       joinedAt: r.joinedAt.toISOString(),
+      lastLoginAt: r.lastLoginAt ? r.lastLoginAt.toISOString() : null,
       status: r.status === "active" ? "active" : "disabled",
       publicKey: r.publicKey ? r.publicKey.toString("base64") : null,
     }));
@@ -275,7 +286,7 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: userId,
         targetName: member.displayName,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { from: target.role, to: role, targetEmail: member.email },
@@ -300,7 +311,11 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
   // ------------------------------------------------------------------
   // Remove a member from the workspace
   // ------------------------------------------------------------------
-  .delete("/:userId", paramValidator(userIdParam), async (c) => {
+  // HIGH finding: removing an org member is destructive (revokes access, strips
+  // vault keys, flags rekey). Gate with `requireVaultUnlocked` so a session-
+  // thief on a stolen cookie cannot purge members without the master password.
+  // requireAuth runs on the router so `c.var.session` is populated here.
+  .delete("/:userId", requireVaultUnlocked, paramValidator(userIdParam), async (c) => {
     const user = c.get("user")!;
     const { userId } = c.req.valid("param");
 
@@ -332,10 +347,39 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
     // name who was removed (the membership/user rows are about to go).
     const removed = await loadMember(current.orgId, userId);
 
+    let affectedVaults: string[] = [];
     await db.transaction(async (tx) => {
       await tx
         .delete(orgMembers)
         .where(and(eq(orgMembers.orgId, current.orgId), eq(orgMembers.userId, userId)));
+
+      // Removing org membership does NOT cascade vault_members / vault_keys
+      // (those FK on users.id, not org membership) — so explicitly strip the
+      // removed user's vault memberships in this org and, for v2 (ZK) vaults,
+      // delete their wrapped vault keys + flag rekey_pending (AC-024.5).
+      await tx
+        .delete(vaultMembers)
+        .where(
+          and(
+            eq(vaultMembers.userId, userId),
+            inArray(
+              vaultMembers.vaultId,
+              tx.select({ id: vaults.id }).from(vaults).where(eq(vaults.orgId, current.orgId)),
+            ),
+          ),
+        );
+
+      affectedVaults = await revokeOrgKeysAndFlag(
+        tx,
+        {
+          orgId: current.orgId,
+          actorUserId: user.id,
+          actorEmail: user.email,
+          ...clientIpAuditFields(c),
+          userAgent: c.req.header("user-agent") ?? null,
+        },
+        userId,
+      );
 
       await tx.insert(auditEvents).values({
         orgId: current.orgId,
@@ -345,10 +389,14 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: userId,
         targetName: removed?.displayName ?? null,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
-        metadata: { removedRole: target.role, targetEmail: removed?.email ?? null },
+        metadata: {
+          removedRole: target.role,
+          targetEmail: removed?.email ?? null,
+          rekeyPendingVaults: affectedVaults,
+        },
       });
     });
 
@@ -467,7 +515,7 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
       targetId: stored.id,
       // Email is the actor's choice to share — fine to log as targetName.
       targetName: email,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { role },
@@ -560,7 +608,7 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "invitation",
       targetId: id,
       targetName: row.email,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
     });
@@ -633,7 +681,7 @@ export const memberRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "invitation",
         targetId: id,
         targetName: row.email,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
       });

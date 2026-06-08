@@ -1,3 +1,5 @@
+- [Per-user KDF salt (Phase C fix #2)](per-user-kdf-salt.md) — migration 0030 users.kdf_salt; GET /auth/kdf-salt (real/decoy) + kdfSalt in /me; generated at all user-creation sites
+- [Gotcha: SQL rpad vs JS padEnd](gotcha-sql-rpad-vs-js-padend.md) — rpad TRUNCATES, padEnd doesn't; verify JS-vs-SQL value before trusting a backfill
 - [API contract conventions](api-contract.md) — Error code names + cookie+CORS rules shared with the web frontend
 - [Project layout & runtime quirks](project-runtime.md) — Where the API lives, embedded-postgres fallback, ports
 - [Dev cookie proxy via Next rewrite](dev-cookie-proxy.md) — Why /api/* rewrite exists; cross-origin cookie drop in dev
@@ -27,3 +29,12 @@
 - [Notifications system](notifications-feature.md) — Migration 0015; createNotification(tx) writer; share/role/revoke/member/send hooks; /notifications CRUD (requireAuth only)
 - [Workspace security-settings + SSO enforcement](workspace-security-settings-round.md) — orgPolicy.ts grew autoLock+sso sub-policy; full GET/PATCH /workspace/settings envelope; SSO domain/JIT cross-org gates; org_domains (AC-006.2) still not built
 - [Workspace slug auto-follows name](workspace-slug-auto-follow.md) — PATCH /workspace regenerates slug from new name; allocateSlug exclude-self; renameSchema name-only; 409 workspace_slug_conflict; slug never-trusted
+- [Round 11 — security audit patches](round11-security-audit-patches.md) — notes viewer gate; recovery resets both creds; temp-grant originalRole; teams 2FA/guest; webhookUrl redact
+- [Bulk share action](bulk-share-action.md) — POST /items/bulk action=share; per-item authority, partial success 200, plain permanent upsert (no originalRole overwrite)
+- [Item meta overlay (6 kinds)](project_item_meta_overlay.md) — 6 item kinds share columns; secrets packed into encrypted __WOXA_META__ notes blob; type is plaintext; no per-kind columns
+- [Item search (Cmd+K)](project_item_search.md) — GET /search server-side fuzzy ILIKE on plaintext name/username/url/type; per-result resolveItemRole RBAC; pg_trgm GIN (migration 0024)
+- [Item versions + password rotation](project_item_versions_password_rotation.md) — US-015 AC-015.2/.3, FR-037 in items.ts; migration 0025; self-contained DEK snapshot; GET /items/:id/versions(/:v)
+- [Gotcha: drizzle migration `when` gate](gotcha-drizzle-migration-when-gate.md) — migrator gates on MAX(created_at); non-monotonic journal silently skips; re-apply via new IF-NOT-EXISTS migration above high-water mark
+- [Redis rate limiting](redis-rate-limiting.md) — rateLimit/peek/consume now async (Redis Lua sliding-window) w/ in-memory fallback when REDIS_URL unset; src/lib/redis.ts singleton
+- [/me/activity + reorder + auto-deny](me-activity-and-reorder.md) — GET /me/activity self-feed (createdAt=occurredAt); sweepStaleAccessRequests 7d null-actor; PATCH /vaults/:id/folders/reorder
+- [Audit masked IP](audit-ip-masked.md) — migration 0033 audit_events.ip_masked; maskIp + clientIpAuditFields helpers (spread into every audit insert); PDPA, full IP never stored; ipHash unchanged

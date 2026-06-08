@@ -25,6 +25,10 @@ export const AUTO_LOCK_MIN = 1;
 export const AUTO_LOCK_MAX = 120;
 export const AUTO_LOCK_DEFAULT = 15;
 
+/** Server clamp range for the org-wide rotation default (US-060). */
+export const ROTATION_DAYS_MIN = 1;
+export const ROTATION_DAYS_MAX = 3650;
+
 /** SSO / identity-provider policies that apply to every member. */
 export interface WorkspaceSsoSettings {
   /**
@@ -56,6 +60,13 @@ export interface WorkspaceSettings {
    * [{@link AUTO_LOCK_MIN}, {@link AUTO_LOCK_MAX}]. There is NO "never".
    */
   autoLockMinutes: number;
+  /**
+   * US-060 / AC-060.1 — org-wide DEFAULT password-rotation window in days, or
+   * `null` (no default). Items whose own `rotationPolicyDays` is null inherit
+   * this. Clamped server-side to [{@link ROTATION_DAYS_MIN}, {@link
+   * ROTATION_DAYS_MAX}]; 0/negative → null.
+   */
+  rotationDefaultDays: number | null;
   /** SSO / identity-provider policies. Always present (server-defaulted). */
   sso: WorkspaceSsoSettings;
 }
@@ -70,6 +81,8 @@ interface WorkspaceSettingsResponse {
 export interface WorkspaceSettingsPatch {
   require2fa?: boolean;
   autoLockMinutes?: number;
+  /** US-060 — org default rotation days, or `null` to clear it. */
+  rotationDefaultDays?: number | null;
   sso?: Partial<WorkspaceSsoSettings>;
 }
 
@@ -91,9 +104,19 @@ function coerceSettings(
     Number.isFinite(raw.autoLockMinutes)
       ? Math.min(AUTO_LOCK_MAX, Math.max(AUTO_LOCK_MIN, Math.round(raw.autoLockMinutes)))
       : AUTO_LOCK_DEFAULT;
+  const rotationDefaultDays =
+    typeof raw?.rotationDefaultDays === "number" &&
+    Number.isFinite(raw.rotationDefaultDays) &&
+    raw.rotationDefaultDays > 0
+      ? Math.min(
+          ROTATION_DAYS_MAX,
+          Math.max(ROTATION_DAYS_MIN, Math.round(raw.rotationDefaultDays)),
+        )
+      : null;
   return {
     require2fa: raw?.require2fa === true,
     autoLockMinutes: minutes,
+    rotationDefaultDays,
     sso: {
       allowedDomains,
       jitEnabled: sso?.jitEnabled !== false,

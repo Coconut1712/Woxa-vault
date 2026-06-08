@@ -1,0 +1,3 @@
+- [Security controls map](security_controls_map.md) — where each server-side control lives (auth middleware, vault-lock stamping, ZK enforcement, RBAC/rate-limit/audit helpers) + how to add one
+- [Security regression test pattern](security_regression_test_pattern.md) — vitest fixture scaffolding (real DB, makeUser/makeVault, session lock state, ZK ciphertext) to ship proof fast
+- [Shipped fixes 2026-06](shipped_fixes_2026_06.md) — fixes from the 2026-06-04 audit pass + the regression test guarding each

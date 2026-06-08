@@ -344,7 +344,7 @@ export function ShareDialog({
               <DropdownMenu open={pickerOpen} onOpenChange={setPickerOpen}>
                 <DropdownMenuTrigger render={<div className="flex items-center gap-2 h-10 px-3 rounded-lg border border-line-2 bg-card/40 cursor-text" />}>
                   <Search className="size-3.5 text-muted-foreground shrink-0" />
-                  <input value={query} onChange={(e) => { setQuery(e.target.value); setPickerOpen(true); }} onFocus={() => setPickerOpen(true)} placeholder={t("share.search_people")} className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground" />
+                  <input value={query} onChange={(e) => { setQuery(e.target.value); setPickerOpen(true); }} onFocus={() => setPickerOpen(true)} placeholder={t("share.search_people")} className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50 rounded-sm" />
                   {adding && <Loader2 className="size-3.5 text-muted-foreground animate-spin" />}
                   {query && !adding && <button type="button" onClick={(e) => { e.stopPropagation(); setQuery(""); }} className="p-0.5 rounded hover:bg-surface-2"><X className="size-3.5 text-muted-foreground" /></button>}
                 </DropdownMenuTrigger>

@@ -112,14 +112,14 @@ describe("item version history + password_changed_at (US-015) integration", () =
     });
     await deps.db.insert(deps.orgMembers).values({ orgId, userId, role: orgRole });
     createdUserIds.push(userId);
-    const { token } = await deps.createSession(userId);
+    const { token } = await deps.createSession(userId, {}, true);
     return { userId, cookie: `${deps.SESSION_COOKIE_NAME}=${token}` };
   }
 
   async function makeVault(orgId: string, createdBy: string): Promise<string> {
     const [v] = await deps.db
       .insert(deps.vaults)
-      .values({ orgId, name: `vault-${randomUUID().slice(0, 8)}`, createdBy })
+      .values({ orgId, name: `vault-${randomUUID().slice(0, 8)}`, createdBy, encryptionVersion: 1 })
       .returning();
     createdVaultIds.push(v!.id);
     return v!.id;
@@ -159,6 +159,17 @@ describe("item version history + password_changed_at (US-015) integration", () =
     return req(`/items/${itemId}`, cookie, { method: "PATCH", body: JSON.stringify(body) });
   }
 
+  // v2 (ZK) password blobs. The server stores ciphertext verbatim and stamps
+  // password_changed_at on its PRESENCE; the version reveal hands back the
+  // ciphertext (never plaintext). Distinct labels prove the snapshot captured
+  // the PRE-edit blob.
+  const pwBlob = (label: string) => ({
+    passwordCiphertext: Buffer.from(`ct-${label}`).toString("base64"),
+    passwordIv: Buffer.from("iv-aaaaaaaaa").toString("base64"),
+  });
+  const PW_ORIG = pwBlob("orig");
+  const PW_NEW = pwBlob("new");
+
   // ---- versioning + prune --------------------------------------------------
 
   it("content PATCH creates a version; >10 edits prune to last 10 (FR-037)", async () => {
@@ -170,7 +181,7 @@ describe("item version history + password_changed_at (US-015) integration", () =
     const item = await createItem(vaultId, owner.cookie, {
       type: "login",
       name: "v0",
-      password: "pw-0",
+      ...PW_ORIG,
     });
 
     // 12 content edits → 12 snapshots BEFORE each edit, pruned to last 10.
@@ -205,7 +216,7 @@ describe("item version history + password_changed_at (US-015) integration", () =
     const item = await createItem(vaultId, owner.cookie, {
       type: "login",
       name: "meta-only",
-      password: "pw",
+      ...PW_ORIG,
     });
 
     const res = await patchItem(item.id, owner.cookie, { folderId: folder!.id });
@@ -231,10 +242,10 @@ describe("item version history + password_changed_at (US-015) integration", () =
     const item = await createItem(vaultId, owner.cookie, {
       type: "login",
       name: "orig",
-      password: "pw-orig",
+      ...PW_ORIG,
     });
     // One content edit so there is exactly one version (snapshot of "orig").
-    expect((await patchItem(item.id, owner.cookie, { password: "pw-new" })).status).toBe(200);
+    expect((await patchItem(item.id, owner.cookie, { ...PW_NEW })).status).toBe(200);
 
     // Viewer: list visible, canReveal false.
     const listRes = await req(`/items/${item.id}/versions`, viewer.cookie);
@@ -248,18 +259,18 @@ describe("item version history + password_changed_at (US-015) integration", () =
     expect(list.versions[0]!.version).toBe(1);
     expect(list.versions[0]!.hasPassword).toBe(true);
     // No secret leaks in the list payload.
-    expect(JSON.stringify(list)).not.toContain("pw-orig");
+    expect(JSON.stringify(list)).not.toContain(PW_ORIG.passwordCiphertext);
 
     // Viewer: revealing a version's content → 403.
     const viewerReveal = await req(`/items/${item.id}/versions/1`, viewer.cookie);
     expect(viewerReveal.status).toBe(403);
 
-    // Manager: reveal → 200, returns the SNAPSHOTTED (pre-edit) password.
+    // Manager: reveal → 200, returns the SNAPSHOTTED (pre-edit) ciphertext.
     const mgrReveal = await req(`/items/${item.id}/versions/1`, owner.cookie);
     expect(mgrReveal.status).toBe(200);
-    const snap = (await mgrReveal.json()) as { version: number; password: string | null };
+    const snap = (await mgrReveal.json()) as { version: number; passwordCiphertext: string | null };
     expect(snap.version).toBe(1);
-    expect(snap.password).toBe("pw-orig");
+    expect(snap.passwordCiphertext).toBe(PW_ORIG.passwordCiphertext);
   });
 
   it("no access to the item → 404 (anti-enumeration) on the version list", async () => {
@@ -269,7 +280,7 @@ describe("item version history + password_changed_at (US-015) integration", () =
     const vaultId = await makeVault(orgId, owner.userId);
     await addVaultMember(vaultId, owner.userId, "manager");
 
-    const item = await createItem(vaultId, owner.cookie, { type: "login", name: "x", password: "p" });
+    const item = await createItem(vaultId, owner.cookie, { type: "login", name: "x", ...PW_ORIG });
     const res = await req(`/items/${item.id}/versions`, stranger.cookie);
     expect(res.status).toBe(404);
   });
@@ -286,7 +297,7 @@ describe("item version history + password_changed_at (US-015) integration", () =
     const item = await createItem(vaultId, owner.cookie, {
       type: "login",
       name: "pwitem",
-      password: "first",
+      ...PW_ORIG,
     });
     expect(item.passwordChangedAt).toBeTruthy();
     const createdStamp = new Date(item.passwordChangedAt!).getTime();
@@ -299,14 +310,14 @@ describe("item version history + password_changed_at (US-015) integration", () =
 
     // Password change → passwordChangedAt ADVANCES.
     await new Promise((res) => setTimeout(res, 5));
-    const r2 = await patchItem(item.id, owner.cookie, { password: "second" });
+    const r2 = await patchItem(item.id, owner.cookie, { ...PW_NEW });
     expect(r2.status).toBe(200);
     const afterPw = ((await r2.json()) as { item: ItemDto }).item;
     expect(new Date(afterPw.passwordChangedAt!).getTime()).toBeGreaterThan(createdStamp);
 
-    // Clearing the password (null) is NOT a rotation — stamp unchanged.
+    // Clearing the password ("") is NOT a rotation — stamp unchanged.
     const pwClearedStamp = new Date(afterPw.passwordChangedAt!).getTime();
-    const r3 = await patchItem(item.id, owner.cookie, { password: null });
+    const r3 = await patchItem(item.id, owner.cookie, { passwordCiphertext: "" });
     expect(r3.status).toBe(200);
     const afterClear = ((await r3.json()) as { item: ItemDto }).item;
     expect(new Date(afterClear.passwordChangedAt!).getTime()).toBe(pwClearedStamp);
@@ -333,7 +344,7 @@ describe("item version history + password_changed_at (US-015) integration", () =
     const item = await createItem(vaultId, owner.cookie, {
       type: "login",
       name: "race-0",
-      password: "pw",
+      ...PW_ORIG,
     });
 
     // Fire several content PATCHes in parallel (simulates double-click / two
@@ -367,7 +378,7 @@ describe("item version history + password_changed_at (US-015) integration", () =
     const vaultId = await makeVault(orgId, owner.userId);
     await addVaultMember(vaultId, owner.userId, "manager");
 
-    const item = await createItem(vaultId, owner.cookie, { type: "login", name: "L0", password: "p" });
+    const item = await createItem(vaultId, owner.cookie, { type: "login", name: "L0", ...PW_ORIG });
     for (let i = 1; i <= 15; i++) {
       expect((await patchItem(item.id, owner.cookie, { name: `L${i}` })).status).toBe(200);
     }
@@ -397,16 +408,16 @@ describe("item version history + password_changed_at (US-015) integration", () =
     const item = await createItem(vaultId, owner.cookie, {
       type: "login",
       name: "aud",
-      password: "pw-orig",
+      ...PW_ORIG,
     });
-    expect((await patchItem(item.id, owner.cookie, { password: "pw-new" })).status).toBe(200);
+    expect((await patchItem(item.id, owner.cookie, { ...PW_NEW })).status).toBe(200);
 
-    // Reveal as the auditor-with-manager-grant → 200 with the snapshot password.
+    // Reveal as the auditor-with-manager-grant → 200 with the snapshot ciphertext.
     const reveal = await req(`/items/${item.id}/versions/1`, auditorMgr.cookie);
     expect(reveal.status).toBe(200);
-    const snap = (await reveal.json()) as { version: number; password: string | null };
+    const snap = (await reveal.json()) as { version: number; passwordCiphertext: string | null };
     expect(snap.version).toBe(1);
-    expect(snap.password).toBe("pw-orig");
+    expect(snap.passwordCiphertext).toBe(PW_ORIG.passwordCiphertext);
   });
 
   it("pure org-auditor (no vault grant) is STILL 403 on version reveal (viewer floor holds)", async () => {
@@ -419,9 +430,9 @@ describe("item version history + password_changed_at (US-015) integration", () =
     const item = await createItem(vaultId, owner.cookie, {
       type: "login",
       name: "aud2",
-      password: "pw-orig",
+      ...PW_ORIG,
     });
-    expect((await patchItem(item.id, owner.cookie, { password: "pw-new" })).status).toBe(200);
+    expect((await patchItem(item.id, owner.cookie, { ...PW_NEW })).status).toBe(200);
 
     // Pure auditor resolves to viewer (org-wide read-only) → reveal blocked.
     const reveal = await req(`/items/${item.id}/versions/1`, pureAuditor.cookie);

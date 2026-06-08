@@ -36,7 +36,7 @@ export interface Vault {
   color: ColorKey;
   itemCount: number;
   memberCount: number;
-  encryptionVersion: 1 | 2;
+  encryptionVersion: 2;
 }
 
 export interface Folder {

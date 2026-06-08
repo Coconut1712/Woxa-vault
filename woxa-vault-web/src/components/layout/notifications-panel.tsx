@@ -14,6 +14,7 @@ import {
   Inbox,
   CheckCircle2,
   XCircle,
+  RotateCw,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -71,6 +72,10 @@ const typeStyles: Record<string, { icon: IconCmp; color: string }> = {
   "access_request.denied": {
     icon: XCircle,
     color: "bg-rose-500/10 ring-rose-500/20 text-rose-600 dark:text-rose-400",
+  },
+  "vault.rekey_pending": {
+    icon: RotateCw,
+    color: "bg-amber-500/10 ring-amber-500/20 text-amber-600 dark:text-amber-400",
   },
 };
 const fallbackStyle = {
@@ -139,6 +144,8 @@ export function NotificationsPanel() {
           return t("notif.access_request_approved.title");
         case "access_request.denied":
           return t("notif.access_request_denied.title");
+        case "vault.rekey_pending":
+          return t("notif.vault_rekey_pending.title");
         default:
           return n.type.replace(/[._]/g, " ");
       }
@@ -176,6 +183,8 @@ export function NotificationsPanel() {
           return t("notif.access_request_approved.body", { target, role });
         case "access_request.denied":
           return t("notif.access_request_denied.body", { target, reason: metaStr(n.metadata, "decisionReason") ?? "" });
+        case "vault.rekey_pending":
+          return t("notif.vault_rekey_pending.body", { target, actor });
         case "send.viewed": {
           const burned = metaStr(n.metadata, "burned");
           if (burned === "true" || burned === "1")
@@ -197,6 +206,7 @@ export function NotificationsPanel() {
     const kind = metaStr(n.metadata, "resourceKind");
     if (n.type === "send.viewed") return "/app/sends";
     if (n.type.startsWith("access_request.")) return "/app/requests";
+    if (n.type === "vault.rekey_pending" && n.targetId) return `/app/vault/${n.targetId}`;
     if (n.type === "share.received" || n.type === "role.changed") {
       if (kind === "vault" && n.targetId) return `/app/vault/${n.targetId}`;
       if (kind === "item" && n.targetId) return `/app/item/${n.targetId}`;

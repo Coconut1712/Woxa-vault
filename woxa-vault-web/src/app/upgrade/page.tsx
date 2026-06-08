@@ -11,13 +11,15 @@ import { Card } from "@/components/ui/card";
 import { useAuth } from "@/lib/auth/provider";
 import { useT } from "@/lib/i18n/provider";
 import { setupPassword } from "@/lib/api/me";
+import { getKdfSalt } from "@/lib/api/auth";
 import { persistPrivateKey } from "@/components/vault-lock/lock-provider";
-import { 
-  deriveMasterKey, 
-  deriveAuthKeyHash, 
-  generateUserKeypair, 
+import {
+  deriveMasterKey,
+  deriveAuthKeyHash,
+  generateUserKeypair,
   encryptPrivateKey,
-  toBase64
+  toBase64,
+  fromBase64
 } from "@/lib/crypto-client";
 
 export default function UpgradePage() {
@@ -41,10 +43,14 @@ export default function UpgradePage() {
 
     setBusy(true);
     try {
-      // Phase C: Generate ZK Keys from existing password
+      // Phase C: Generate ZK Keys from existing password.
       // The user enters their CURRENT master password to derive the keys.
-      const masterKey = await deriveMasterKey(password, me.id);
-      const masterAuthKeyHash = await deriveAuthKeyHash(masterKey, me.id);
+      // Use the server-issued per-user KDF salt so the derived key matches at
+      // future unlocks. Prefer the salt on /me; fall back to a direct lookup.
+      const saltB64 = me.kdfSalt ?? (await getKdfSalt(me.email));
+      const salt = fromBase64(saltB64);
+      const masterKey = await deriveMasterKey(password, salt);
+      const masterAuthKeyHash = await deriveAuthKeyHash(masterKey, salt);
       
       const { publicKey, privateKey } = generateUserKeypair();
       const encrypted = await encryptPrivateKey(privateKey, masterKey);

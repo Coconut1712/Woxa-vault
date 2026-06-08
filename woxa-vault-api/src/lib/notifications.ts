@@ -50,6 +50,7 @@ export const NOTIFICATION_TYPES = [
   "access_request.created",
   "access_request.approved",
   "access_request.denied",
+  "vault.rekey_pending",
 ] as const;
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
@@ -66,6 +67,7 @@ const TYPE_TO_PREFERENCE: Record<NotificationType, NotificationPreference> = {
   "access_request.created": "vaultShared",
   "access_request.approved": "vaultShared",
   "access_request.denied": "vaultShared",
+  "vault.rekey_pending": "vaultShared",
 };
 
 // Resource kinds carried in metadata for the resource-sharing events.

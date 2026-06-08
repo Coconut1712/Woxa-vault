@@ -210,3 +210,144 @@ export async function removeVaultTeamMember(
     { method: "DELETE" },
   );
 }
+
+/* ---------------------------------------------------------------------------
+ * Phase C Wave-3b — client-driven vault re-key + v1→v2 migration.
+ *
+ * All three mutations are client-driven (the server holds no vault key,
+ * search key, or plaintext): the browser fetches every member's public key,
+ * generates/rotates the vault key, wraps it for each member, re-encrypts every
+ * item + recomputes the blind-index terms, and POSTs the result. The server
+ * applies it atomically. See /API_CONTRACT.md "Vault re-key & migration".
+ * ------------------------------------------------------------------------- */
+
+/**
+ * One member's public key, for wrapping the vault key during a re-key/migrate.
+ * `publicKey === null` means the member has NOT enrolled zero-knowledge yet —
+ * they CANNOT receive a wrapped key and will lose access after the rotation
+ * unless the admin enrolls them first. The UI must warn before proceeding.
+ */
+export interface VaultMemberKey {
+  userId: string;
+  email: string;
+  publicKey: string | null;
+}
+
+/** A vault key wrapped to one member's public key (base64). */
+export interface WrappedKeyInput {
+  userId: string;
+  wrappedKey: string;
+}
+
+/**
+ * One item's re-encrypted v2 payload. Every field is a client blob the server
+ * stores verbatim. `nameCiphertext`/`nameIv` are required; the rest may clear
+ * with `null`. `searchTerms` REPLACES the item's whole blind-index term set.
+ */
+export interface ReEncryptedItem {
+  id: string;
+  nameCiphertext: string;
+  nameIv: string;
+  usernameCiphertext?: string | null;
+  usernameIv?: string | null;
+  urlCiphertext?: string | null;
+  urlIv?: string | null;
+  passwordCiphertext?: string | null;
+  passwordIv?: string | null;
+  notesCiphertext?: string | null;
+  notesIv?: string | null;
+  searchTerms?: string[];
+}
+
+export interface RekeyPayload {
+  expectedKeyVersion: number;
+  newKeyVersion: number;
+  wrappedKeys: WrappedKeyInput[];
+  items: ReEncryptedItem[];
+}
+
+/**
+ * GET /vaults/:id/member-keys — the EFFECTIVE roster of vault members (direct +
+ * team-derived, deduped) with each member's X25519 public key, for wrapping the
+ * new vault key. Owner/admin OR vault manager only. `publicKey === null` flags
+ * a member who hasn't enrolled ZK.
+ */
+export async function listVaultMemberKeys(
+  vaultId: string,
+  signal?: AbortSignal,
+): Promise<VaultMemberKey[]> {
+  const res = await apiFetch<{ memberKeys: VaultMemberKey[] }>(
+    `/vaults/${encodeURIComponent(vaultId)}/member-keys`,
+    { signal },
+  );
+  return Array.isArray(res?.memberKeys) ? res.memberKeys : [];
+}
+
+/**
+ * POST /vaults/:id/rekey — rotate a v2 vault's key and re-encrypt every item
+ * (used after a revoke when `rekeyPending` is true). Vault manager only.
+ * Throws `ApiError` with `code: "rekey_conflict"` (409) when the key version
+ * changed under us — reload and retry.
+ */
+export async function rekeyVault(
+  vaultId: string,
+  payload: RekeyPayload,
+): Promise<{ keyVersion: number; rekeyPending: boolean; itemCount: number }> {
+  return apiFetch(`/vaults/${encodeURIComponent(vaultId)}/rekey`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
+/**
+ * POST /vaults/:id/migrate — opt-in, reversible v1→v2 migration. Owner/admin
+ * only. Same payload shape as re-key (expectedKeyVersion is the v1 key version,
+ * normally 1). Returns the rollback window. Throws `migrate_not_v1` /
+ * `rekey_conflict` on conflict.
+ */
+export async function migrateVault(
+  vaultId: string,
+  payload: RekeyPayload,
+): Promise<{
+  encryptionVersion: number;
+  keyVersion: number;
+  itemCount: number;
+  rollbackAvailableUntil: string;
+}> {
+  return apiFetch(`/vaults/${encodeURIComponent(vaultId)}/migrate`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
+/**
+ * POST /vaults/:id/migrate/rollback — revert a v1→v2 migration within the 30-day
+ * window. Owner/admin only, no body. Throws `rollback_unavailable` when no
+ * backup exists (never migrated, or retention elapsed).
+ */
+export async function rollbackVaultMigration(
+  vaultId: string,
+): Promise<{ encryptionVersion: number; restoredItemCount: number }> {
+  return apiFetch(`/vaults/${encodeURIComponent(vaultId)}/migrate/rollback`, {
+    method: "POST",
+  });
+}
+
+/**
+ * PATCH /vaults/:id/folders/reorder — persist a new folder display order
+ * (US-011.4). `order` is the full list of folder ids in their desired order.
+ * Requires edit rights on the vault. The FoldersProvider applies the new order
+ * optimistically and reverts on a thrown error.
+ */
+export async function reorderFolders(
+  vaultId: string,
+  order: string[],
+): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(
+    `/vaults/${encodeURIComponent(vaultId)}/folders/reorder`,
+    {
+      method: "PATCH",
+      body: { order },
+    },
+  );
+}

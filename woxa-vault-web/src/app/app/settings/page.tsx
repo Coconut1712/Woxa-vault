@@ -71,9 +71,12 @@ import { ApiError, VAULT_UNLOCKED_EVENT } from "@/lib/api/client";
 import {
   getWorkspaceSettings,
   updateWorkspaceSettings,
+  ROTATION_DAYS_MAX,
+  ROTATION_DAYS_MIN,
   type WorkspaceSettings,
   type WorkspaceSettingsPatch,
 } from "@/lib/api/workspace-settings";
+import { parseRotationDays } from "@/components/vault/rotation-badge";
 import {
   listMyWorkspaces,
   renameWorkspace,
@@ -493,6 +496,25 @@ function SecurityPolicySection() {
     );
   };
 
+  // US-060 — org default rotation window. Local draft committed on blur so the
+  // input doesn't PATCH on every keystroke; null clears the default.
+  const [rotationDraft, setRotationDraft] = useState<string | null>(null);
+  const rotationValue =
+    rotationDraft ??
+    (settings?.rotationDefaultDays ? String(settings.rotationDefaultDays) : "");
+
+  const commitRotationDefault = () => {
+    if (!settings) return;
+    const next = parseRotationDays(rotationValue);
+    setRotationDraft(null);
+    if (next === (settings.rotationDefaultDays ?? null)) return;
+    void patch(
+      { rotationDefaultDays: next },
+      (prev) => ({ ...prev, rotationDefaultDays: next }),
+      () => toast.success(t("rotation.org_default.toast_saved")),
+    );
+  };
+
   return (
     <div className="space-y-6">
       <SectionTitle
@@ -576,6 +598,43 @@ function SecurityPolicySection() {
                 <SelectItem value="120">{t("secpol.hours", { n: 2 })}</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+
+          <Separator className="bg-surface-3" />
+
+          {/* US-060 — org-wide default password-rotation window. */}
+          <div className="flex items-start gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium flex items-center gap-1.5">
+                {t("rotation.org_default.title")}
+                {saving && (
+                  <Loader2 className="size-3 animate-spin text-muted-foreground" />
+                )}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {t("rotation.org_default.desc")}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Input
+                type="number"
+                inputMode="numeric"
+                min={ROTATION_DAYS_MIN}
+                max={ROTATION_DAYS_MAX}
+                value={rotationValue}
+                onChange={(e) => setRotationDraft(e.target.value)}
+                onBlur={commitRotationDefault}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                }}
+                disabled={!canEdit || !settings || loadFailed || saving}
+                placeholder={t("rotation.org_default.placeholder")}
+                className="w-32 h-9"
+              />
+              <span className="text-xs text-muted-foreground">
+                {t("rotation.policy.unit")}
+              </span>
+            </div>
           </div>
 
           <Separator className="bg-surface-3" />

@@ -20,9 +20,11 @@ import type {
   ItemCreateInput,
   ItemFull,
   ItemSummary,
+  ItemType,
   ItemUpdateInput,
   ItemVersionContent,
   ItemVersionListResponse,
+  VaultRole,
 } from "./types";
 
 interface ItemListResponse {
@@ -149,6 +151,43 @@ export async function getItemVersion(
     `/items/${encodeURIComponent(id)}/versions/${version}`,
     { signal },
   );
+}
+
+/**
+ * One row of the "secrets need rotation" dashboard feed (US-060 / AC-060.2).
+ * Metadata only — NEVER any secret material. For v2 items `name` is `""` and
+ * the client decrypts `nameCiphertext` with the vault key.
+ */
+export interface RotationDueItem {
+  id: string;
+  vaultId: string;
+  vaultName: string;
+  type: ItemType;
+  name: string;
+  nameCiphertext: string | null;
+  nameIv: string | null;
+  rotationStatus: "due" | "overdue";
+  rotationDueAt: string;
+  rotationPolicyDays: number | null;
+  passwordChangedAt: string;
+  effectiveRole: VaultRole;
+}
+
+export interface RotationDueResponse {
+  items: RotationDueItem[];
+  counts: { due: number; overdue: number; total: number };
+}
+
+/**
+ * GET /items/rotation-due (US-060 / AC-060.2) — items in the active workspace
+ * whose password is due/overdue under the effective policy, plus counts.
+ * RBAC-filtered to reachable items; not audited (a count is not a reveal).
+ * Sorted overdue-first, then soonest-due.
+ */
+export async function listRotationDue(
+  signal?: AbortSignal,
+): Promise<RotationDueResponse> {
+  return apiFetch<RotationDueResponse>("/items/rotation-due", { signal });
 }
 
 /** DELETE /items/:id — 204 on success. */

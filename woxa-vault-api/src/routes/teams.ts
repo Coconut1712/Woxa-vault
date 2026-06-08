@@ -12,7 +12,7 @@ import {
   type TeamMember,
 } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { rateLimit } from "@/lib/rateLimit";
 import { jsonValidator, paramValidator } from "@/lib/validator";
@@ -92,7 +92,7 @@ export const teamRoutes = new Hono<{ Variables: AuthVariables }>()
       action: "team.list_viewed",
       targetType: "organization",
       targetId: activeOrg.orgId,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { count: rows.length },
@@ -142,7 +142,7 @@ export const teamRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "team",
       targetId: created.id,
       targetName: created.name,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
     });
@@ -189,7 +189,7 @@ export const teamRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "team",
       targetId: id,
       targetName: teamRow.name,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
     });
@@ -243,7 +243,7 @@ export const teamRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "team",
       targetId: id,
       targetName: updated.name,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { patch: body },
@@ -280,7 +280,7 @@ export const teamRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "team",
       targetId: id,
       targetName: deleted.name,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
     });
@@ -334,7 +334,7 @@ export const teamRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "team",
       targetId: id,
       targetName: team.name,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { userId: body.userId, userEmail: targetUser?.email, role: body.role },
@@ -378,7 +378,7 @@ export const teamRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "team",
       targetId: id,
       targetName: team.name,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { userId, userEmail: targetUser?.email },

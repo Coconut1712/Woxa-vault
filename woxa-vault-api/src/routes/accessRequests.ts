@@ -15,7 +15,7 @@ import {
   type AccessRequest,
 } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { rateLimit } from "@/lib/rateLimit";
 import { jsonValidator, paramValidator } from "@/lib/validator";
@@ -117,7 +117,7 @@ export const accessRequestRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: input.targetType,
       targetId: input.targetId,
       targetName: targetName,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { requestId: created.id, requestedRole: input.requestedRole, reason: input.reason, durationMinutes: input.durationMinutes },
@@ -205,7 +205,7 @@ export const accessRequestRoutes = new Hono<{ Variables: AuthVariables }>()
       action: "access_request.list_viewed",
       targetType: "organization",
       targetId: activeOrg.orgId,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { count: requests.length },
@@ -352,7 +352,7 @@ export const accessRequestRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: request.targetType,
         targetId: request.targetId,
         targetName: request.targetName,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { requestId: request.id, requesterId: request.requesterId, approvedRole, approvedDurationMinutes: approvedDuration, decisionReason: input.decisionReason },

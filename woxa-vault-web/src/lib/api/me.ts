@@ -100,6 +100,15 @@ export interface MeUser {
   /** Phase C: Zero-Knowledge Encryption */
   isZeroKnowledge?: boolean;
   publicKey?: string | null;
+  /**
+   * Phase C crypto fix #2: server-issued per-user Argon2id salt (base64), used
+   * as the `salt` argument to `deriveMasterKey` for setup / upgrade / unlock.
+   * The exact bytes the server stored at credential setup — fetching it here
+   * (rather than re-deriving client-side) guarantees the master key matches
+   * across setup↔unlock. Optional in the type to tolerate an older backend that
+   * predates the field — callers must guard for `undefined`.
+   */
+  kdfSalt?: string | null;
 }
 
 interface MeResponse {
@@ -270,6 +279,45 @@ export async function revokeOtherSessions(input: {
     method: "POST",
     body: input,
   });
+}
+
+/**
+ * A single entry in the current user's own activity feed (AC-041.1–3). Scoped
+ * to the caller — the backend filters to audit rows the user themselves
+ * generated over the last 90 days. `ipHash`/`userAgent` may be null on older
+ * rows or events recorded without a request context.
+ */
+export type ActivityEvent = {
+  id: string;
+  action: string;
+  targetType: string | null;
+  targetName: string | null;
+  ipHash: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  success: boolean;
+  metadata: Record<string, unknown> | null;
+};
+
+/**
+ * GET /me/activity — paginated feed of the caller's own audit events (last 90
+ * days). `total` is the row count across all pages so the UI can render
+ * "Page N of M".
+ */
+export async function getMyActivity(params?: {
+  page?: number;
+  limit?: number;
+  action?: string;
+  signal?: AbortSignal;
+}): Promise<{ events: ActivityEvent[]; total: number; page: number }> {
+  const query = new URLSearchParams();
+  if (params?.page) query.set("page", String(params.page));
+  if (params?.limit) query.set("limit", String(params.limit));
+  if (params?.action) query.set("action", params.action);
+  return apiFetch<{ events: ActivityEvent[]; total: number; page: number }>(
+    `/me/activity${query.size ? `?${query}` : ""}`,
+    { signal: params?.signal },
+  );
 }
 
 /** GET /me/notifications/settings — read user's notification preferences. */

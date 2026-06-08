@@ -30,6 +30,7 @@ import { ssoRoutes } from "@/routes/sso";
 import { trashRoutes } from "@/routes/trash";
 import { twoFactorRoutes } from "@/routes/twoFactor";
 import { vaultMemberRoutes } from "@/routes/vaultMembers";
+import { vaultRekeyRoutes } from "@/routes/vaultRekey";
 import { vaultRoutes } from "@/routes/vaults";
 import { workspaceRoutes } from "@/routes/workspace";
 
@@ -94,6 +95,9 @@ export function createApp() {
   app.route("/vaults", vaultItemRoutes);
   app.route("/vaults", vaultFolderRoutes);
   app.route("/vaults", vaultMemberRoutes);
+  // Re-key (Phase C Wave-2b). The specific `/:id/rekey` path must mount before
+  // the generic vaultRoutes `/:id` handlers.
+  app.route("/vaults", vaultRekeyRoutes);
   app.route("/vaults", vaultRoutes);
   // Attachment + member sub-routers live under /items so list+upload+share
   // share the path prefix with item discovery. They MUST mount BEFORE

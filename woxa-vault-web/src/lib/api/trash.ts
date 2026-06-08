@@ -24,6 +24,9 @@ export interface TrashItem {
   deletedAt: string;
   deletedBy: { id: string; displayName: string } | null;
   purgeAt: string;
+  /** Present for v2 (ZK) vaults — base64 encoded. Null for v1 (server-side). */
+  nameCiphertext: string | null;
+  nameIv: string | null;
 }
 
 interface TrashListResponse {

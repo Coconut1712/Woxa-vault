@@ -270,17 +270,14 @@ function PasswordStep({
               )}
             </button>
           </div>
-          <div className="flex items-center justify-between text-xs">
+          <div className="flex justify-end">
             <button
               type="button"
               onClick={onForgot}
-              className="text-muted-foreground hover:text-foreground"
+              className="text-xs font-medium text-muted-foreground transition-colors hover:text-brand"
             >
               {t("login.forgot_password_link")}
             </button>
-            <span className="text-muted-foreground flex items-center gap-1">
-              <ShieldCheck className="size-3" /> {t("login.secure_connection")}
-            </span>
           </div>
         </div>
 
@@ -292,6 +289,11 @@ function PasswordStep({
           {submitting ? t("login.signing_in") : t("login.sign_in")}{" "}
           {!submitting && <ArrowRight className="size-4" />}
         </Button>
+
+        <p className="flex items-center justify-center gap-1.5 text-[11px] text-muted-foreground/70">
+          <ShieldCheck className="size-3 shrink-0" />
+          {t("login.secure_connection")}
+        </p>
       </form>
 
       <p className="text-xs text-muted-foreground text-center mt-6">

@@ -33,6 +33,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { DeleteWithPasswordDialog } from "@/components/shared/delete-with-password-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -430,7 +431,7 @@ export default function MembersPage() {
               tone="amber"
             />
             <StatPill
-              label={t("common.role")}
+              label={t("members.stat.my_role")}
               value={
                 currentRole ? t(`members.role.${currentRole}`) : "—"
               }
@@ -609,19 +610,26 @@ export default function MembersPage() {
                       <td className="px-2 py-3">
                         <span
                           className={cn(
-                            "inline-flex items-center gap-1 text-[11px]",
+                            "inline-flex items-center gap-1.5 text-[11px]",
                             m.status === "active"
                               ? "text-emerald-600 dark:text-emerald-400"
                               : "text-muted-foreground",
                           )}
                         >
+                          {m.status === "active" && (
+                            <span className="size-1.5 rounded-full bg-emerald-500 shrink-0" />
+                          )}
                           {m.status === "active"
                             ? t("common.active")
-                            : t("common.status")}
+                            : t("common.inactive")}
                         </span>
                       </td>
                       <td className="px-2 py-3 text-muted-foreground text-[11px]">
-                        {m.lastActiveAt ? timeAgo(m.lastActiveAt) : "—"}
+                        {m.lastLoginAt
+                          ? timeAgo(m.lastLoginAt)
+                          : m.lastActiveAt
+                            ? timeAgo(m.lastActiveAt)
+                            : "—"}
                       </td>
                       <td className="px-5 py-3 text-right">
                         {/* Row actions appear only when the actor strictly
@@ -709,41 +717,24 @@ export default function MembersPage() {
         resendingId={busyInviteId}
       />
 
-      {/* Remove confirmation */}
-      <Dialog
+      {/* Remove confirmation — gated by master password */}
+      <DeleteWithPasswordDialog
         open={pendingRemoval !== null}
         onOpenChange={(open) => {
           if (!open) setPendingRemoval(null);
         }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("members.actions.remove")}</DialogTitle>
-            <DialogDescription>
-              {pendingRemoval?.email}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setPendingRemoval(null)}
-            >
-              {t("common.cancel")}
-            </Button>
-            <Button
-              className="bg-rose-500 text-white hover:bg-rose-500/90"
-              disabled={
-                pendingRemoval ? busyMemberId === pendingRemoval.userId : false
-              }
-              onClick={() => {
-                if (pendingRemoval) void handleRemove(pendingRemoval);
-              }}
-            >
-              <Trash2 className="size-3.5" /> {t("members.actions.remove")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        title={t("members.remove.title")}
+        description={t("members.remove.desc", {
+          name: pendingRemoval?.displayName || pendingRemoval?.email || "",
+        })}
+        confirmLabel={t("members.actions.remove")}
+        busy={
+          pendingRemoval ? busyMemberId === pendingRemoval.userId : false
+        }
+        onConfirmed={() => {
+          if (pendingRemoval) return handleRemove(pendingRemoval);
+        }}
+      />
 
       {/* Role change confirmation */}
       <Dialog
@@ -966,7 +957,7 @@ function InviteMemberDialog({
               autoFocus
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="name@example.com"
+              placeholder={t("members.invite.email_placeholder")}
             />
           </div>
 

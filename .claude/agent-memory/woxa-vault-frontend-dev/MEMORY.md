@@ -1,3 +1,4 @@
+- [My Activity + folder reorder](project_my_activity_and_folder_reorder.md) — GET /me/activity (AC-041.1-3) + PATCH /vaults/:id/folders/reorder (US-011.4) frontend wrappers; backend must match
 - [Auth wiring overview](project_auth_wiring.md) — where AuthProvider/SessionGuard/API client live and what they own
 - [Round-2 API scaffolding](project_api_scaffolding.md) — vaults/items/sso clients + which UI surfaces are live vs still mock
 - [API contract source of truth](reference_api_contract.md) — pointer to /API_CONTRACT.md for cross-agent agreements
@@ -16,8 +17,14 @@
 - [Self-service signup (/signup)](project_self_service_signup.md) — email+login-password signup, register() API+provider, two-password copy, hands off to setup-password ladder
 - [Login vs Master password copy](project_login_vs_master_password_copy.md) — sign-in surfaces say "password"; Master Password only for vault unlock + sensitive re-auth (which keys, which to keep)
 - [Folder/item sharing + effectiveRole gating](project_folder_item_sharing.md) — grants.ts wrappers, ShareDialog resourceKind dispatch, per-item "most specific wins" affordance gating, view-only state
-- [Audit Log wired to GET /audit](project_audit_log_wired.md) — audit.ts wrapper, keyset Load-more, server vs client filters, action→i18n map, guessed action codes to verify
+- [Audit Log wired to GET /audit](project_audit_log_wired.md) — audit.ts wrapper, PAGE-based pager (25/50/75/100), all-server-side filters + /audit/actors, page-reset-in-handlers, action→i18n map
+- [Playwright screenshot harness](reference_playwright_screenshot_harness.md) — how to screenshot an authed /app page with no backend: route-mock /auth/me+/me, seed unlock ts, array-safe /vaults
 - [Trash feature](project_trash_feature.md) — Trash page wired to real /trash endpoints (admin-only); src/lib/api/trash.ts; type is login|note only; purgeAt + useVaults().refresh()
 - [Workspace settings full wiring](project_workspace_settings_full_wiring.md) — GET/PATCH /workspace/settings; useWorkspaceSettingsController hook; only require2fa+autoLock live, rest Preview
 - [SSO enforcement Phase A](project_sso_enforcement_phase_a.md) — requireSso/jitEnabled/allowedDomains are Preview-only (not enforced) until AC-006.2 verified domain binding ships
 - [UI honesty: no fake Enforced](feedback_ui_honesty_no_fake_enforced.md) — never render live/Enforced UI for a security feature the backend doesn't actually enforce; use inert Preview pattern
+- [Bulk Share (RESOLVED)](project_bulk_share_backend_missing.md) — /items/bulk share action now live + frontend wired; BulkShareDialog, payload contract, partial-report pattern, lint gotcha
+- [Security headers + CSP](project_security_headers_csp.md) — headers() static set + src/proxy.ts nonce CSP; ships Report-Only, CSP_ENFORCE=1 to enforce; connect-src from NEXT_PUBLIC_API_BASE_URL
+- [ZK blind-index + metadata encryption](project_zk_blind_index.md) — Phase C v2 token model (MUST match backend), overlay read/write/search paths, locked-vault handling
+- [Phase C crypto rotation + rotation tracking](project_phase_c_crypto_rotation.md) — client-driven re-key/migrate flow, wrapped-key blob layout, RotationBadge/widget, toggleFavorite v2 fix, VaultLockedError
+- [DeleteWithPasswordDialog](reference_delete_with_password_dialog.md) — shared master-password-gated delete dialog; delete_confirm.* keys; wired into vault/trash/teams/members deletes

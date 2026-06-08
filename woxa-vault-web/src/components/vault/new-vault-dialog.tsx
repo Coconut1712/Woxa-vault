@@ -117,9 +117,8 @@ export function NewVaultDialog({
   const [description, setDescription] = useState("");
   const [icon, setIcon] = useState("rocket");
   const [color, setColor] = useState<ColorKey>("violet");
-  const [mode, setMode] = useState<EncryptionMode>(
-    me?.isZeroKnowledge ? "zero_knowledge" : "envelope"
-  );
+  // Always ZK (v2) — v1 server-side encryption is no longer an option.
+  const mode: EncryptionMode = "zero_knowledge";
   const [template, setTemplate] = useState("empty");
   const [submitting, setSubmitting] = useState(false);
 
@@ -128,50 +127,48 @@ export function NewVaultDialog({
     setDescription("");
     setIcon("rocket");
     setColor("violet");
-    setMode(me?.isZeroKnowledge ? "zero_knowledge" : "envelope");
     setTemplate("empty");
   };
 
   const submit = async () => {
     if (!name.trim() || submitting) return;
+
+    // All vaults are now v2 (ZK). Require the user to have set up their
+    // master password (which gives them a public key) before creating a vault.
+    if (!me?.publicKey) {
+      toast.error(t("nv.error.no_master_password"), {
+        description: t("nv.error.no_master_password_desc"),
+      });
+      return;
+    }
+
     setSubmitting(true);
     try {
-      let encryptionVersion = 1;
-      let wrappedKey: string | undefined = undefined;
-
-      if (mode === "zero_knowledge" && me?.publicKey) {
-        encryptionVersion = 2;
-        // 1. Generate random vault key
-        const vaultKey = window.crypto.getRandomValues(new Uint8Array(32));
-        // 2. Wrap it for the creator
-        const wrapped = await wrapVaultKey(
-          vaultKey,
-          Uint8Array.from(atob(me.publicKey), (c) => c.charCodeAt(0))
-        );
-        
-        // We'll send the wrapped key as a combined base64 blob or individual fields.
-        // For simplicity, let's use a standard format: ephemeralPub + iv + tag + ciphertext
-        const combined = new Uint8Array(
-          wrapped.ephemeralPublicKey.length +
+      // Always v2: generate a random vault key and wrap it for the creator.
+      const vaultKey = window.crypto.getRandomValues(new Uint8Array(32));
+      const wrapped = await wrapVaultKey(
+        vaultKey,
+        Uint8Array.from(atob(me.publicKey), (c) => c.charCodeAt(0)),
+      );
+      const combined = new Uint8Array(
+        wrapped.ephemeralPublicKey.length +
           wrapped.iv.length +
           wrapped.authTag.length +
-          wrapped.ciphertext.length
-        );
-        let offset = 0;
-        combined.set(wrapped.ephemeralPublicKey, offset); offset += wrapped.ephemeralPublicKey.length;
-        combined.set(wrapped.iv, offset); offset += wrapped.iv.length;
-        combined.set(wrapped.authTag, offset); offset += wrapped.authTag.length;
-        combined.set(wrapped.ciphertext, offset);
-
-        wrappedKey = toBase64(combined);
-      }
+          wrapped.ciphertext.length,
+      );
+      let offset = 0;
+      combined.set(wrapped.ephemeralPublicKey, offset); offset += wrapped.ephemeralPublicKey.length;
+      combined.set(wrapped.iv, offset); offset += wrapped.iv.length;
+      combined.set(wrapped.authTag, offset); offset += wrapped.authTag.length;
+      combined.set(wrapped.ciphertext, offset);
+      const wrappedKey = toBase64(combined);
 
       const vault = await createVault({
         name: name.trim(),
         description: description.trim() ? description.trim() : null,
         iconKey: icon,
         color,
-        encryptionVersion,
+        encryptionVersion: 2,
         wrappedKey,
       });
       toast.success(t("toast.vault_created"), {
@@ -346,29 +343,16 @@ export function NewVaultDialog({
 
           <Separator className="bg-surface-3" />
 
-          {/* Encryption mode */}
-          <div className="space-y-2">
-            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-              {t("nv.encryption")}
-            </Label>
-            <div className="grid grid-cols-2 gap-2">
-              <EncryptionOption
-                active={mode === "zero_knowledge"}
-                onClick={() => setMode("zero_knowledge")}
-                icon={ShieldCheck}
-                title={t("nv.zk")}
-                badge={t("nv.zk_badge")}
-                description={t("nv.zk_desc")}
-                color="emerald"
-              />
-              <EncryptionOption
-                active={mode === "envelope"}
-                onClick={() => setMode("envelope")}
-                icon={Server}
-                title={t("nv.server_side")}
-                description={t("nv.server_side_desc")}
-                color="blue"
-              />
+          {/* Encryption — always ZK (v2), shown as info badge only */}
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500/[0.06] dark:bg-emerald-500/[0.04] border border-emerald-500/20 dark:border-emerald-500/15">
+            <ShieldCheck className="size-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                {t("nv.zk")}
+              </p>
+              <p className="text-[11px] text-emerald-700/70 dark:text-emerald-400/70">
+                {t("nv.zk_desc")}
+              </p>
             </div>
           </div>
 

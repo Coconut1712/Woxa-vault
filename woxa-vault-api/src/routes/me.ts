@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { and, count, eq, inArray, isNull, ne, sql, or } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, isNull, ne, sql, or } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { db } from "@/db/client";
 import {
   auditEvents,
@@ -12,7 +13,7 @@ import {
   users,
 } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { hashIp, maskIp, clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { logger } from "@/lib/logger";
 import { orgsForUser, resolveActiveOrg, type OrgRole } from "@/lib/orgAccess";
@@ -25,7 +26,8 @@ import {
   normalizeRecoveryCode,
 } from "@/lib/recoveryKit";
 import { buildSessionCookie, createSession } from "@/lib/session";
-import { jsonValidator } from "@/lib/validator";
+import { generateKdfSalt } from "@/lib/kdfSalt";
+import { jsonValidator, queryValidator } from "@/lib/validator";
 import { requireAuth, type AuthVariables } from "@/middleware/auth";
 import { createHash } from "node:crypto";
 
@@ -111,6 +113,16 @@ const verifyPasswordSchema = z.object({
   lockReason: z.enum(["idle", "manual", "restart", "sleep"]).optional(),
 });
 
+// AC-041.1–3 — query for the user's own activity feed. `limit` caps at 50 so a
+// caller can't pull an unbounded page; offset pagination via `page` matches the
+// spec's `{ events, total, page }` envelope (this surface is self-scoped + small,
+// so offset paging is acceptable here unlike the keyset-paged org /audit log).
+const activityQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(50).optional(),
+  action: z.string().min(1).max(120).optional(),
+});
+
 const notificationSettingsSchema = z.object({
   newLogin: z.boolean().optional(),
   sendReceived: z.boolean().optional(),
@@ -163,6 +175,9 @@ interface UserPayload {
   /** Phase C: Zero-Knowledge Encryption */
   isZeroKnowledge: boolean;
   publicKey: string | null;
+  // Phase C fix #2: per-user Argon2id salt (base64) for client-side master-key
+  // derivation. Always present for rows created/backfilled after migration 0030.
+  kdfSalt: string | null;
 }
 
 async function buildUserPayload(
@@ -230,6 +245,7 @@ async function buildUserPayload(
     requiresTwoFactorEnroll,
     isZeroKnowledge: row.authKeyHash !== null || row.masterAuthKeyHash !== null,
     publicKey,
+    kdfSalt: row.kdfSalt ?? null,
     // requiresPasswordSetup gates the "Set a master password" affordance for
     // SSO JIT users on the frontend. True iff the row has no master hash/key.
     requiresPasswordSetup: row.passwordHash === null && row.masterAuthKeyHash === null,
@@ -307,6 +323,61 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
   })
 
   // ------------------------------------------------------------------
+  // GET /me/activity — the caller's OWN audit trail (AC-041.1–3)
+  // ------------------------------------------------------------------
+  // Self-scoped: every row is filtered to `actorUserId = current user`, so the
+  // caller can only ever see their own actions — no IDOR surface (no client-
+  // supplied user id). This naturally includes the account-level
+  // `account.vault_unlock_success` / `account.vault_unlock_failed` rows, which
+  // are written with the same actor id. Window is the last 90 days.
+  //
+  // Distinct from the admin-only org `/audit` log: that surface shows EVERY
+  // member's events and is gated to owner/admin; this one is the user's private
+  // "what did I do" feed and is open to any authenticated caller for their own
+  // rows only.
+  .get("/activity", queryValidator(activityQuerySchema), async (c) => {
+    const user = c.get("user")!;
+    const q = c.req.valid("query");
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 25;
+    const offset = (page - 1) * limit;
+
+    const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+
+    const conds: SQL[] = [
+      eq(auditEvents.actorUserId, user.id),
+      gte(auditEvents.occurredAt, since),
+    ];
+    if (q.action) conds.push(eq(auditEvents.action, q.action));
+    const where = and(...conds);
+
+    const [rows, totalRow] = await Promise.all([
+      db
+        .select()
+        .from(auditEvents)
+        .where(where)
+        .orderBy(desc(auditEvents.occurredAt), desc(auditEvents.id))
+        .limit(limit)
+        .offset(offset),
+      db.select({ value: count() }).from(auditEvents).where(where),
+    ]);
+
+    const events = rows.map((r) => ({
+      id: r.id,
+      action: r.action,
+      targetType: r.targetType,
+      targetName: r.targetName,
+      ipHash: r.ipHash,
+      userAgent: r.userAgent,
+      createdAt: r.occurredAt.toISOString(),
+      success: r.success,
+      metadata: r.metadata,
+    }));
+
+    return c.json({ events, total: Number(totalRow[0]?.value ?? 0), page });
+  })
+
+  // ------------------------------------------------------------------
   // PATCH /me — update profile (displayName only in Phase A)
   // ------------------------------------------------------------------
   .patch("/", jsonValidator(profilePatchSchema), async (c) => {
@@ -326,7 +397,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
       action: "account.profile_updated",
       targetType: "user",
       targetId: user.id,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { field: "displayName", from: previous, to: displayName },
@@ -362,6 +433,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
     const { password, publicKey, encryptedPrivateKey, privateKeyIv, privateKeyAuthTag } = body;
     const ip = getClientIp(c);
     const ipHash = hashIp(ip);
+    const ipMasked = maskIp(ip);
     const userAgent = c.req.header("user-agent") ?? null;
 
     // Cache the SSO flag from the session-loaded user BEFORE the UPDATE so
@@ -391,6 +463,13 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
     const recoveryKitHash = await hashRecoveryCode(recoveryCode);
     const now = new Date();
 
+    // Phase C fix #2: ensure a per-user KDF salt exists for client-side
+    // master-key derivation. NEVER overwrite an existing salt — doing so would
+    // change the derivation and orphan any data already wrapped under the old
+    // salt. New rows (register/SSO/invite) already carry one; this covers any
+    // legacy row that predates the column being populated at creation.
+    const kdfSaltToSet = user.kdfSalt ? undefined : generateKdfSalt();
+
     const completion = await db.transaction(async (tx) => {
       // Atomic race winner: only one writer can transition password_hash
       // from NULL to a real hash, OR transition from Phase A to Phase C.
@@ -401,6 +480,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
           // Only update loginAuthKeyHash if provided (ZK upgrade).
           // Otherwise leave users.authKeyHash (legacy login ZK) and users.loginPasswordHash alone.
           ...(serverSideLoginAuthKeyHash ? { authKeyHash: serverSideLoginAuthKeyHash } : {}),
+          ...(kdfSaltToSet ? { kdfSalt: kdfSaltToSet } : {}),
           masterAuthKeyHash: serverSideMasterAuthKeyHash,
           passwordUpdatedAt: now,
           recoveryKitHash,
@@ -470,6 +550,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
         // viaSso reflects whether the account was created through Google JIT
@@ -485,6 +566,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
         metadata: { reason: "setup" },
@@ -561,7 +643,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
     const user = c.get("user")!;
     const sessionToken = c.get("sessionToken");
     const { password, authKeyHash, masterAuthKeyHash, lockReason } = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     // WARN-J: stamp `Cache-Control: no-store` BEFORE any rate-limit or auth
@@ -585,10 +667,22 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
       );
     }
 
+    // MEDIUM finding: once an account has upgraded to `masterAuthKeyHash`, the
+    // deprecated `authKeyHash` factor must NOT be accepted for vault unlock.
+    // Refuse the legacy factor outright (force the client to derive + send
+    // masterAuthKeyHash) rather than silently falling back to a weaker / stale
+    // stored hash. A caller that supplies masterAuthKeyHash is unaffected.
+    if (user.masterAuthKeyHash && authKeyHash && !masterAuthKeyHash) {
+      await consumeRateLimit(HARD_KEY, { windowMs: HARD_OPTS.windowMs });
+      throw errors.invalidCredentials(
+        "This account requires masterAuthKeyHash; the legacy authKeyHash factor is no longer accepted.",
+      );
+    }
+
     const inputFactor = masterAuthKeyHash ?? authKeyHash;
     const factorProvided = inputFactor ? "zk" : "password";
-    const storedHash = factorProvided === "zk" 
-      ? (user.masterAuthKeyHash ?? user.authKeyHash) 
+    const storedHash = factorProvided === "zk"
+      ? (user.masterAuthKeyHash ?? user.authKeyHash)
       : user.passwordHash;
 
     const auditFailure = async (
@@ -602,6 +696,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "user",
           targetId: user.id,
           ipHash,
+          ipMasked,
           userAgent,
           success: false,
           metadata: { 
@@ -654,9 +749,10 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: user.id,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
-        metadata: { phase: "C", factor: factorProvided, ...(lockReason ? { lockReason } : {}) },
+        metadata: { phase: "A", factor: factorProvided, ...(lockReason ? { lockReason } : {}) },
       });
     });
 
@@ -685,6 +781,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
       const { password } = c.req.valid("json");
       const ip = getClientIp(c);
       const ipHash = hashIp(ip);
+      const ipMasked = maskIp(ip);
       const userAgent = c.req.header("user-agent") ?? null;
 
       // CRITICAL-5: two-tier rate limit.
@@ -739,6 +836,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
             targetType: "user",
             targetId: user.id,
             ipHash,
+            ipMasked,
             userAgent,
             success: false,
             metadata: { reason: "wrong_password" },
@@ -768,6 +866,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "user",
           targetId: user.id,
           ipHash,
+          ipMasked,
           userAgent,
           success: true,
           metadata: { reason: "user_request" },
@@ -828,7 +927,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
       action: "account.notification_settings_updated",
       targetType: "user",
       targetId: user.id,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { patch },
@@ -858,7 +957,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
       const user = c.get("user")!;
       const { password } = c.req.valid("json");
       const currentToken = c.get("sessionToken");
-      const ipHash = hashIp(getClientIp(c));
+      const { ipHash, ipMasked } = clientIpAuditFields(c);
       const userAgent = c.req.header("user-agent") ?? null;
 
       const RL_KEY = `me-sessions-revoke-all:${user.id}`;
@@ -892,6 +991,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "user",
           targetId: user.id,
           ipHash,
+          ipMasked,
           userAgent,
           success: false,
           metadata: { reason: "wrong_password" },
@@ -933,6 +1033,7 @@ export const meRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "user",
           targetId: user.id,
           ipHash,
+          ipMasked,
           userAgent,
           success: true,
           metadata: { revokedCount },

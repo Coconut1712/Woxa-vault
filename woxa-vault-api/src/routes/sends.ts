@@ -4,10 +4,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { encodeBase32LowerCaseNoPadding } from "@oslojs/encoding";
 import { db } from "@/db/client";
-import { auditEvents, oneTimeSends } from "@/db/schema";
+import { auditEvents, items, oneTimeSends, vaults } from "@/db/schema";
+import { resolveItemRole } from "@/lib/access";
 import { env } from "@/config/env";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { hashIp, maskIp, clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import {
   decryptField,
@@ -72,6 +73,13 @@ const createSchema = z.object({
   expiresInMinutes: z.number().int().min(1).max(7 * 24 * 60),
   maxViews: z.number().int().min(1).max(100).optional(),
   password: z.string().min(6).max(256).optional(),
+  // OPTIONAL source item: when a send is created FROM a vault item, the
+  // frontend passes that item's id so the CREATE audit event can be attributed
+  // to the item (it then surfaces in GET /items/:id/activity). Omitted →
+  // behavior is unchanged (send-scoped audit event). Access is re-verified
+  // server-side; an inaccessible/cross-org itemId is silently ignored (we fall
+  // back to a send-scoped event and never leak whether the item exists).
+  itemId: z.string().uuid().optional(),
 });
 
 const revealSchema = z.object({ password: z.string().min(1).max(256).optional() });
@@ -223,18 +231,56 @@ export const sendRoutes = new Hono<{ Variables: AuthVariables }>()
         .returning();
       if (!row) throw errors.internal("Send insert returned no row");
 
+      // CREATE-event attribution (US-033 item-source linkage). When the send was
+      // created FROM a vault item, attribute the create event to that item so it
+      // shows in GET /items/:id/activity. We MUST re-verify access server-side —
+      // the request only carries an opaque id, never the item's plaintext — and
+      // be LENIENT: if the item is missing, inaccessible, or in a different org
+      // than the send, we silently fall back to a send-scoped event (no 403, no
+      // existence leak). The send itself always succeeds either way.
+      let itemAttribution: { targetId: string; targetName: string | null } | null = null;
+      if (body.itemId) {
+        const item = await db.query.items.findFirst({
+          where: and(eq(items.id, body.itemId), isNull(items.deletedAt)),
+        });
+        if (item) {
+          const role = await resolveItemRole(user.id, {
+            id: item.id,
+            vaultId: item.vaultId,
+            folderId: item.folderId,
+          });
+          if (role) {
+            // Org match: the item's vault org must equal the send's org context.
+            // A null send-org (personal send) can never match a vaulted item.
+            const vault = await db.query.vaults.findFirst({
+              where: eq(vaults.id, item.vaultId),
+            });
+            if (vault && current?.orgId && vault.orgId === current.orgId) {
+              itemAttribution = { targetId: item.id, targetName: item.name };
+            }
+          }
+        }
+      }
+
       await db.insert(auditEvents).values({
         orgId: current?.orgId ?? null,
         actorUserId: user.id,
         actorEmail: user.email,
         action: "send.create",
-        targetType: "send",
-        targetId: row.id,
-        targetName: null,
-        ipHash: hashIp(getClientIp(c)),
+        targetType: itemAttribution ? "item" : "send",
+        targetId: itemAttribution ? itemAttribution.targetId : row.id,
+        targetName: itemAttribution ? itemAttribution.targetName : null,
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
-        metadata: { maxViews, expiresInMinutes: body.expiresInMinutes, hasPassword: !!body.password },
+        metadata: itemAttribution
+          ? {
+              sendId: row.id,
+              maxViews,
+              expiresInMinutes: body.expiresInMinutes,
+              hasPassword: !!body.password,
+            }
+          : { maxViews, expiresInMinutes: body.expiresInMinutes, hasPassword: !!body.password },
       });
 
       return c.json(
@@ -280,7 +326,7 @@ export const sendRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "send",
           targetId: id,
           targetName: null,
-          ipHash: hashIp(getClientIp(c)),
+          ...clientIpAuditFields(c),
           userAgent: c.req.header("user-agent") ?? null,
           success: true,
           metadata: { reason: "manual" },
@@ -384,7 +430,7 @@ export const publicSendRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "send",
         targetId: row.id,
         targetName: null,
-        ipHash: hashIp(ip),
+        ipHash: hashIp(ip), ipMasked: maskIp(ip),
         userAgent: c.req.header("user-agent") ?? null,
         success: false,
         metadata: { reason: "preview_guard", ageMs },
@@ -419,7 +465,7 @@ export const publicSendRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "send",
           targetId: row.id,
           targetName: null,
-          ipHash: hashIp(ip),
+          ipHash: hashIp(ip), ipMasked: maskIp(ip),
           userAgent: c.req.header("user-agent") ?? null,
           success: false,
           metadata: { reason: "bad_password" },
@@ -486,7 +532,7 @@ export const publicSendRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "send",
           targetId: claimed.id,
           targetName: null,
-          ipHash: hashIp(ip),
+          ipHash: hashIp(ip), ipMasked: maskIp(ip),
           userAgent: c.req.header("user-agent") ?? null,
           success: true,
           metadata: { viewsRemaining, burned },

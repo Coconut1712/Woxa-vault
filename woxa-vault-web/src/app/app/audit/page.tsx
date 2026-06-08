@@ -7,14 +7,14 @@ import {
   Filter,
   Search,
   X,
-  Check,
   Calendar,
   User as UserIcon,
   Zap,
   ShieldCheck,
-  Loader2,
   CheckCircle2,
   XCircle,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
@@ -39,8 +39,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ApiErrorState, ApiLoadingState } from "@/components/shared/api-states";
-import { listAudit, type AuditEvent } from "@/lib/api/audit";
+import {
+  listAudit,
+  listAuditActors,
+  type AuditEvent,
+  type AuditActor,
+} from "@/lib/api/audit";
 import { ApiError, VAULT_UNLOCKED_EVENT } from "@/lib/api/client";
 import {
   actionLabelKey,
@@ -55,7 +61,8 @@ import { canViewAuditLog } from "@/lib/auth/permissions";
 
 type DateRange = "all" | "today" | "7d" | "30d" | "90d";
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE_OPTIONS = [25, 50, 75, 100] as const;
+const DEFAULT_PAGE_SIZE = 25;
 
 /**
  * Ordered list of action-filter groups. Each group's `match` maps a raw action
@@ -120,21 +127,42 @@ export default function AuditPage() {
     }
   }, [status, me, allowed, router]);
 
-  // ---- Filters (drive server-side refetch where the backend supports them) --
+  // ---- Filters (all drive server-side refetch) ----------------------------
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [selectedAction, setSelectedAction] = useState<string | null>(null);
+  // Stores actor USER IDs (sent as the repeatable `actor=` param).
   const [selectedActors, setSelectedActors] = useState<Set<string>>(new Set());
   const [dateRange, setDateRange] = useState<DateRange>("all");
 
+  // ---- Pagination ---------------------------------------------------------
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+  const [total, setTotal] = useState(0);
+
   // ---- Data ---------------------------------------------------------------
   const [events, setEvents] = useState<AuditEvent[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
 
-  // Bump to force a refetch-from-top whenever a server-side filter changes.
+  // ---- Actor directory (org-wide, not just the loaded page) ---------------
+  const [actors, setActors] = useState<AuditActor[]>([]);
+
+  // Bump to force a refetch whenever an external event (unlock) demands it.
   const [reloadKey, setReloadKey] = useState(0);
+
+  // Debounce the free-text search (~300ms) before it drives a refetch; a changed
+  // search term resets to page 1.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setDebouncedQuery((prev) => {
+        const next = query.trim();
+        if (next !== prev) setPage(1);
+        return next;
+      });
+    }, 300);
+    return () => clearTimeout(id);
+  }, [query]);
 
   // `from` is derived from the date-range pill; `to` is always "now" (open end).
   const fromIso = useMemo(() => {
@@ -143,7 +171,19 @@ export default function AuditPage() {
     return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   }, [dateRange]);
 
-  // Initial / filter-change fetch (resets the cursor and replaces all rows).
+  // Load the org's distinct actors once the admin role is confirmed.
+  useEffect(() => {
+    if (status !== "authenticated" || !me || !allowed) return;
+    const controller = new AbortController();
+    listAuditActors(controller.signal)
+      .then((list) => setActors(list))
+      .catch(() => {
+        /* actor dropdown is best-effort; ignore failures */
+      });
+    return () => controller.abort();
+  }, [status, me, allowed, reloadKey]);
+
+  // Page/filter-change fetch — the list REPLACES on every fetch (no append).
   useEffect(() => {
     if (status !== "authenticated" || !me || !allowed) return;
 
@@ -153,15 +193,18 @@ export default function AuditPage() {
 
     listAudit(
       {
-        limit: PAGE_SIZE,
+        page,
+        limit: pageSize,
         action: selectedAction,
         from: fromIso,
+        q: debouncedQuery || null,
+        actor: selectedActors.size > 0 ? Array.from(selectedActors) : null,
       },
       controller.signal,
     )
-      .then((page) => {
-        setEvents(page.events);
-        setNextCursor(page.nextCursor);
+      .then((res) => {
+        setEvents(res.events);
+        setTotal(res.total);
       })
       .catch((err) => {
         if (controller.signal.aborted) return;
@@ -176,78 +219,72 @@ export default function AuditPage() {
       });
 
     return () => controller.abort();
-  }, [status, me, allowed, selectedAction, fromIso, reloadKey]);
+  }, [
+    status,
+    me,
+    allowed,
+    page,
+    pageSize,
+    selectedAction,
+    fromIso,
+    debouncedQuery,
+    selectedActors,
+    reloadKey,
+  ]);
 
-  const loadMore = useCallback(() => {
-    if (!nextCursor || loadingMore) return;
-    setLoadingMore(true);
-    listAudit({
-      limit: PAGE_SIZE,
-      action: selectedAction,
-      from: fromIso,
-      cursor: nextCursor,
-    })
-      .then((page) => {
-        setEvents((prev) => [...prev, ...page.events]);
-        setNextCursor(page.nextCursor);
-      })
-      .catch((err) => {
-        toast.error(
-          err instanceof ApiError ? err.message : t("api.error.generic"),
-        );
-      })
-      .finally(() => setLoadingMore(false));
-  }, [nextCursor, loadingMore, selectedAction, fromIso, t]);
+  // Map userId → email for chip labels.
+  const actorEmailById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of actors) map.set(a.userId, a.email);
+    return map;
+  }, [actors]);
 
-  // Actor choices are derived from whatever rows are currently loaded.
-  const allActors = useMemo(() => {
-    const set = new Set<string>();
-    for (const ev of events) {
-      if (ev.actorEmail) set.add(ev.actorEmail);
-    }
-    return Array.from(set).sort();
-  }, [events]);
-
-  // Client-side narrowing over loaded rows: free-text search + actor filter.
-  const filtered = useMemo(() => {
-    return events.filter((ev) => {
-      if (selectedActors.size > 0) {
-        if (!ev.actorEmail || !selectedActors.has(ev.actorEmail)) return false;
-      }
-      if (query) {
-        const q = query.toLowerCase();
-        const hay = [
-          ev.actorEmail ?? "",
-          ev.action,
-          ev.targetName ?? "",
-          ev.targetType ?? "",
-        ]
-          .join(" ")
-          .toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-  }, [events, selectedActors, query]);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const rangeStart = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const rangeEnd = Math.min(page * pageSize, total);
 
   const activeFilterCount =
     (selectedAction ? 1 : 0) +
     selectedActors.size +
     (dateRange !== "all" ? 1 : 0);
 
+  // Filter mutators reset to page 1 (changing the result set invalidates the
+  // current page index). These run from user events, never during render.
+  const changeAction = (value: string | null) => {
+    setSelectedAction(value);
+    setPage(1);
+  };
+
+  const changeDateRange = (value: DateRange) => {
+    setDateRange(value);
+    setPage(1);
+  };
+
+  const changePageSize = (value: number) => {
+    setPageSize(value);
+    setPage(1);
+  };
+
+  const clearActors = () => {
+    setSelectedActors(new Set());
+    setPage(1);
+  };
+
   const clearAll = () => {
     setSelectedAction(null);
     setSelectedActors(new Set());
     setDateRange("all");
+    setPage(1);
   };
 
-  const toggleActor = (value: string) => {
+  const toggleActor = (userId: string) => {
     setSelectedActors((prev) => {
       const next = new Set(prev);
-      if (next.has(value)) next.delete(value);
-      else next.add(value);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
       return next;
     });
+    setPage(1);
   };
 
   // Filter UI labels operate on a raw action CODE (base label only).
@@ -278,18 +315,18 @@ export default function AuditPage() {
       "targetType",
       "targetName",
       "success",
-      "ipHash",
+      "ipMasked",
     ];
     const rows = [
       header,
-      ...filtered.map((ev) => [
+      ...events.map((ev) => [
         ev.occurredAt,
         ev.actorEmail ?? "",
         ev.action,
         ev.targetType ?? "",
         ev.targetName ?? "",
         ev.success ? "true" : "false",
-        ev.ipHash ?? "",
+        ev.ipMasked ?? "",
       ]),
     ];
     const csv = rows
@@ -326,7 +363,7 @@ export default function AuditPage() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    toast.success(t("audit.exported", { n: filtered.length }), {
+    toast.success(t("audit.exported", { n: events.length }), {
       description: t("audit.exported_desc", {
         file: `woxa-audit-${stamp}.csv`,
       }),
@@ -348,48 +385,60 @@ export default function AuditPage() {
 
   return (
     <>
-      <Topbar
-        title={t("audit.title")}
-        subtitle={t("audit.subtitle")}
-        actions={
-          <>
+      <Topbar title={t("audit.title")} subtitle={t("audit.subtitle")} />
+
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-5xl mx-auto p-8">
+          <Card className="overflow-hidden p-0">
+          {/* Toolbar: header strip of the results card. Left = Filters ▾ + search;
+              right = result count + Export. Active-filter chips sit in a second
+              row below a divider. */}
+          <div className="border-b border-line-1 bg-surface-1/60">
+          <div className="flex items-center gap-2 flex-wrap px-4 py-3">
             <Popover>
               <PopoverTrigger
-                className={cn(
-                  "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md text-xs font-medium border transition-colors",
-                  activeFilterCount > 0
-                    ? "border-brand/30 bg-brand/10 text-foreground"
-                    : "border-line-2 bg-background hover:bg-surface-1",
-                )}
-              >
-                <Filter className="size-3.5" />
-                {t("common.filters")}
-                {activeFilterCount > 0 && (
-                  <Badge
+                render={
+                  <Button
                     variant="outline"
-                    className="text-[9px] h-4 px-1 ml-0.5 font-medium border-brand/30 bg-brand/15 text-brand"
+                    size="sm"
+                    className={cn(
+                      "h-9 bg-card/60",
+                      activeFilterCount > 0 &&
+                        "border-brand/30 bg-brand/10 text-foreground hover:bg-brand/15",
+                    )}
                   >
-                    {activeFilterCount}
-                  </Badge>
-                )}
-              </PopoverTrigger>
+                    <Filter className="size-3.5" />
+                    {t("common.filters")}
+                    {activeFilterCount > 0 && (
+                      <Badge
+                        variant="outline"
+                        className="text-[9px] h-4 px-1 ml-0.5 font-medium border-brand/30 bg-brand/15 text-brand"
+                      >
+                        {activeFilterCount}
+                      </Badge>
+                    )}
+                  </Button>
+                }
+              />
               <PopoverContent
-                align="end"
+                align="start"
                 className="w-80 p-0 max-h-[70vh] overflow-hidden flex flex-col"
               >
-                <div className="px-4 pt-4 pb-3 flex items-center justify-between border-b border-border">
+                <div className="px-4 pt-4 pb-3 flex items-center justify-between border-b border-line-1">
                   <h3 className="text-sm font-semibold">{t("common.filters")}</h3>
                   {activeFilterCount > 0 && (
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="xs"
                       onClick={clearAll}
-                      className="text-[11px] text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+                      className="text-muted-foreground"
                     >
                       <X className="size-3" /> {t("common.clear_all")}
-                    </button>
+                    </Button>
                   )}
                 </div>
 
-                <div className="overflow-y-auto p-4 space-y-5">
+                <div className="overflow-y-auto p-4 space-y-4">
                   {/* Date range (server-side from/to) */}
                   <div className="space-y-2">
                     <label className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold flex items-center gap-1.5">
@@ -397,10 +446,23 @@ export default function AuditPage() {
                     </label>
                     <Select
                       value={dateRange}
-                      onValueChange={(v) => v && setDateRange(v as DateRange)}
+                      onValueChange={(v) => v && changeDateRange(v as DateRange)}
                     >
-                      <SelectTrigger className="h-9">
-                        <SelectValue />
+                      <SelectTrigger className="h-8 w-full">
+                        <SelectValue>
+                          {(value: string | null) => {
+                            const v = (value as DateRange) ?? dateRange;
+                            return v === "all"
+                              ? t("audit.filter.all_time")
+                              : v === "today"
+                                ? t("audit.filter.24h")
+                                : v === "7d"
+                                  ? t("audit.filter.7d")
+                                  : v === "30d"
+                                    ? t("audit.filter.30d")
+                                    : t("audit.filter.90d");
+                          }}
+                        </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="all">{t("audit.filter.all_time")}</SelectItem>
@@ -422,13 +484,23 @@ export default function AuditPage() {
                     <Select
                       value={selectedAction ?? "__all__"}
                       onValueChange={(v) =>
-                        setSelectedAction(v && v !== "__all__" ? v : null)
+                        changeAction(v && v !== "__all__" ? v : null)
                       }
                     >
-                      <SelectTrigger className="h-9">
-                        <SelectValue />
+                      <SelectTrigger className="h-8 w-full">
+                        <SelectValue>
+                          {(value: string | null) => {
+                            const v = (value as string) ?? selectedAction;
+                            return !v || v === "__all__"
+                              ? t("audit.filter.all_actions")
+                              : actionLabel(v);
+                          }}
+                        </SelectValue>
                       </SelectTrigger>
-                      <SelectContent className="max-h-72">
+                      <SelectContent
+                        alignItemWithTrigger={false}
+                        className="max-h-72 w-auto min-w-(--anchor-width) max-w-[min(22rem,calc(100vw-2rem))]"
+                      >
                         <SelectItem value="__all__">
                           {t("audit.filter.all_actions")}
                         </SelectItem>
@@ -457,33 +529,34 @@ export default function AuditPage() {
                         <UserIcon className="size-3" /> {t("audit.filter.actor")}
                       </label>
                       {selectedActors.size > 0 && (
-                        <button
-                          onClick={() => setSelectedActors(new Set())}
-                          className="text-[10px] text-muted-foreground hover:text-foreground"
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          onClick={clearActors}
+                          className="text-muted-foreground"
                         >
                           {t("common.clear")}
-                        </button>
+                        </Button>
                       )}
                     </div>
                     <div className="space-y-1 max-h-32 overflow-y-auto -mx-1 px-1">
-                      {allActors.length === 0 ? (
+                      {actors.length === 0 ? (
                         <p className="text-xs text-muted-foreground px-2 py-1.5">
-                          {t("audit.empty_title")}
+                          {t("audit.filter.no_actors")}
                         </p>
                       ) : (
-                        allActors.map((actor) => (
+                        actors.map((actor) => (
                           <label
-                            key={actor}
+                            key={actor.userId}
                             className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-surface-1 cursor-pointer"
                           >
-                            <input
-                              type="checkbox"
-                              className="size-3.5 accent-brand"
-                              checked={selectedActors.has(actor)}
-                              onChange={() => toggleActor(actor)}
+                            <Checkbox
+                              checked={selectedActors.has(actor.userId)}
+                              onCheckedChange={() => toggleActor(actor.userId)}
+                              aria-label={actor.email}
                             />
                             <span className="text-xs font-mono-secret flex-1 truncate">
-                              {actor}
+                              {actor.email}
                             </span>
                           </label>
                         ))
@@ -492,73 +565,88 @@ export default function AuditPage() {
                   </div>
                 </div>
 
-                <div className="border-t border-border px-4 py-2.5 flex items-center justify-between bg-surface-1 text-[11px] text-muted-foreground">
-                  <span>{t("audit.loaded_count", { n: events.length })}</span>
-                  {activeFilterCount === 0 && <Check className="size-3" />}
+                <div className="border-t border-line-1 px-4 py-2.5 bg-surface-1 text-[11px] text-muted-foreground">
+                  {t("audit.total_events", { total })}
                 </div>
               </PopoverContent>
             </Popover>
 
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={exportCsv}
-              disabled={filtered.length === 0}
-            >
-              <Download className="size-3.5" /> {t("audit.export_csv")}
-            </Button>
-          </>
-        }
-      />
-
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-5xl mx-auto p-8">
-          {/* Search + active filter chips */}
-          <div className="mb-4 flex items-center gap-2 flex-wrap">
             <div className="relative flex-1 min-w-48 max-w-sm">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
               <Input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={t("audit.search")}
-                className="pl-9 h-9"
+                className="pl-9 h-9 bg-card/60 border-line-1"
               />
             </div>
 
-            {dateRange !== "all" && (
-              <ActiveChip
-                onClear={() => setDateRange("all")}
-                icon={<Calendar className="size-3" />}
-                label={dateRangeLabel}
-              />
-            )}
-            {selectedAction && (
-              <ActiveChip
-                icon={<Zap className="size-3" />}
-                label={actionLabel(selectedAction)}
-                onClear={() => setSelectedAction(null)}
-              />
-            )}
-            {Array.from(selectedActors).map((actor) => (
-              <ActiveChip
-                key={actor}
-                icon={<UserIcon className="size-3" />}
-                label={actor}
-                onClear={() => toggleActor(actor)}
-              />
-            ))}
+            <div className="ml-auto flex items-center gap-2">
+              <span className="inline-flex items-center h-9 px-2.5 rounded-md border border-line-1 bg-card/60 text-xs text-muted-foreground tabular-nums">
+                {t("audit.showing_range", {
+                  start: rangeStart,
+                  end: rangeEnd,
+                  total,
+                })}
+              </span>
 
-            <div className="ml-auto text-xs text-muted-foreground tabular-nums">
-              {t("audit.loaded_count", { n: filtered.length })}
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-9 bg-card/60"
+                onClick={exportCsv}
+                disabled={events.length === 0}
+              >
+                <Download className="size-3.5" /> {t("audit.export_csv")}
+              </Button>
             </div>
           </div>
 
-          <Card className="overflow-hidden p-0">
+          {/* Active filter chips — second toolbar row under a divider */}
+          {activeFilterCount > 0 && (
+            <div className="flex items-center gap-2 flex-wrap border-t border-line-1/70 px-4 py-2.5">
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mr-0.5">
+                {t("audit.applied_filters")}
+              </span>
+              {dateRange !== "all" && (
+                <ActiveChip
+                  onClear={() => setDateRange("all")}
+                  icon={<Calendar className="size-3" />}
+                  label={dateRangeLabel}
+                />
+              )}
+              {selectedAction && (
+                <ActiveChip
+                  icon={<Zap className="size-3" />}
+                  label={actionLabel(selectedAction)}
+                  onClear={() => setSelectedAction(null)}
+                />
+              )}
+              {Array.from(selectedActors).map((userId) => (
+                <ActiveChip
+                  key={userId}
+                  icon={<UserIcon className="size-3" />}
+                  label={actorEmailById.get(userId) ?? userId}
+                  onClear={() => toggleActor(userId)}
+                />
+              ))}
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={clearAll}
+                className="text-muted-foreground h-7 ml-auto"
+              >
+                <X className="size-3" /> {t("common.clear_all")}
+              </Button>
+            </div>
+          )}
+          </div>
+
             {loading ? (
               <ApiLoadingState variant="inline" label={t("audit.loading")} />
             ) : error ? (
               <ApiErrorState error={error} onRetry={retry} variant="inline" />
-            ) : events.length === 0 ? (
+            ) : total === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center px-6">
                 <Filter className="size-6 mb-2 opacity-50 text-muted-foreground" />
                 <h3 className="font-medium mb-1">{t("audit.empty_title")}</h3>
@@ -569,7 +657,7 @@ export default function AuditPage() {
             ) : (
               <>
                 <table className="w-full text-sm">
-                  <thead className="text-[10px] text-muted-foreground uppercase tracking-wider border-b border-border bg-surface-1">
+                  <thead className="text-[10px] text-muted-foreground uppercase tracking-wider border-b border-line-1 bg-card/40">
                     <tr>
                       <th className="text-left font-semibold px-6 py-3 w-44">
                         {t("audit.col.timestamp")}
@@ -589,7 +677,7 @@ export default function AuditPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filtered.length === 0 ? (
+                    {events.length === 0 ? (
                       <tr>
                         <td
                           colSpan={5}
@@ -600,17 +688,17 @@ export default function AuditPage() {
                         </td>
                       </tr>
                     ) : (
-                      filtered.map((ev) => (
+                      events.map((ev) => (
                         <tr
                           key={ev.id}
-                          className="border-b border-border/60 last:border-b-0 hover:bg-surface-1"
+                          className="border-b border-line-1/60 last:border-b-0 hover:bg-surface-1"
                         >
                           <td className="px-6 py-3 text-muted-foreground text-xs tabular-nums">
                             {formatDateTime(ev.occurredAt)}
                           </td>
                           <td className="px-2 py-3">
                             <div className="flex items-center gap-2">
-                              <div className="size-6 rounded-full bg-gradient-to-br from-white/[0.08] to-white/[0.02] border border-line-1 flex items-center justify-center text-[10px] font-semibold uppercase">
+                              <div className="size-6 rounded-full bg-surface-2 border border-line-1 flex items-center justify-center text-[10px] font-semibold uppercase text-muted-foreground">
                                 {(ev.actorEmail ?? "?").slice(0, 1)}
                               </div>
                               <span className="text-xs">
@@ -649,9 +737,7 @@ export default function AuditPage() {
                             )}
                           </td>
                           <td className="px-2 py-3 text-muted-foreground text-xs font-mono-secret truncate max-w-24">
-                            {ev.ipHash
-                              ? ev.ipHash.slice(0, 8)
-                              : t("audit.no_target")}
+                            {ev.ipMasked ?? "—"}
                           </td>
                         </tr>
                       ))
@@ -659,21 +745,72 @@ export default function AuditPage() {
                   </tbody>
                 </table>
 
-                {nextCursor && (
-                  <div className="border-t border-border px-6 py-3 flex justify-center bg-surface-1">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={loadMore}
-                      disabled={loadingMore}
+                <div className="border-t border-line-1 px-4 sm:px-6 py-3 flex items-center gap-3 flex-wrap bg-surface-1">
+                  <div className="flex items-center gap-2">
+                    <label
+                      htmlFor="audit-page-size"
+                      className="text-xs text-muted-foreground whitespace-nowrap"
                     >
-                      {loadingMore ? (
-                        <Loader2 className="size-3.5 animate-spin" />
-                      ) : null}
-                      {t("audit.load_more")}
-                    </Button>
+                      {t("audit.per_page")}
+                    </label>
+                    <Select
+                      value={String(pageSize)}
+                      onValueChange={(v) => v && changePageSize(Number(v))}
+                    >
+                      <SelectTrigger
+                        id="audit-page-size"
+                        className="h-8 w-[4.5rem] bg-card/60"
+                      >
+                        <SelectValue>
+                          {(value: string | null) =>
+                            (value as string) ?? String(pageSize)
+                          }
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PAGE_SIZE_OPTIONS.map((size) => (
+                          <SelectItem key={size} value={String(size)}>
+                            {size}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
-                )}
+
+                  <div className="ml-auto flex items-center gap-3">
+                    <span className="text-xs text-muted-foreground tabular-nums">
+                      {t("audit.page_of", { page, total: totalPages })}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 bg-card/60"
+                        onClick={() => setPage((p) => Math.max(1, p - 1))}
+                        disabled={loading || page <= 1}
+                      >
+                        <ChevronLeft className="size-3.5" />
+                        <span className="hidden sm:inline">
+                          {t("audit.prev")}
+                        </span>
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 bg-card/60"
+                        onClick={() =>
+                          setPage((p) => Math.min(totalPages, p + 1))
+                        }
+                        disabled={loading || page >= totalPages}
+                      >
+                        <span className="hidden sm:inline">
+                          {t("audit.next")}
+                        </span>
+                        <ChevronRight className="size-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
               </>
             )}
           </Card>
@@ -698,7 +835,9 @@ function ActiveChip({
       className="inline-flex items-center gap-1.5 h-7 px-2 rounded-md text-xs font-medium border border-brand/30 bg-brand/10 text-foreground hover:bg-brand/15 transition-colors"
     >
       {icon}
-      <span className="max-w-32 truncate">{label}</span>
+      <span className="max-w-32 truncate" title={label}>
+        {label}
+      </span>
       <X className="size-3 opacity-60" />
     </button>
   );

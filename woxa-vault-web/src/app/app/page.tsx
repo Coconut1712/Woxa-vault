@@ -22,6 +22,7 @@ import { IconTile } from "@/components/icon";
 import { NewItemDialog } from "@/components/vault/new-item-dialog";
 import { NewVaultDialog } from "@/components/vault/new-vault-dialog";
 import { EditVaultDialog } from "@/components/vault/edit-vault-dialog";
+import { RotationWidget } from "@/components/vault/rotation-widget";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -89,7 +90,9 @@ export default function DashboardPage() {
       await Promise.allSettled([
         listSends(signal),
         listMembers(signal),
-        canViewAudit ? listAudit({ limit: 50 }, signal) : Promise.resolve(null),
+        canViewAudit
+          ? listAudit({ page: 1, limit: 50 }, signal)
+          : Promise.resolve(null),
         canViewAudit ? listWorkspaceVaults(signal) : Promise.resolve(null),
       ]);
     if (signal?.aborted) return;
@@ -103,7 +106,7 @@ export default function DashboardPage() {
     }
     if (auditRes.status === "fulfilled" && auditRes.value) {
       setRecentActivity(auditRes.value.events);
-      setAuditHasMore(auditRes.value.nextCursor !== null);
+      setAuditHasMore(auditRes.value.total > auditRes.value.events.length);
     }
     if (wsVaultsRes.status === "fulfilled" && wsVaultsRes.value) {
       setWorkspaceVaults(wsVaultsRes.value);
@@ -206,6 +209,9 @@ export default function DashboardPage() {
             />
           </div>
 
+          {/* Secrets needing rotation (US-060) — self-hides when nothing's due. */}
+          <RotationWidget />
+
           {/* Vaults grid */}
           <section>
             <SectionHeader title={t("dash.your_vaults")} />
@@ -248,14 +254,12 @@ export default function DashboardPage() {
                               <h3 className="font-semibold truncate tracking-tight text-[15px]">
                                 {v.name}
                               </h3>
-                              {v.encryptionVersion >= 2 && (
-                                <Badge
-                                  variant="outline"
-                                  className="text-[9px] h-4 px-1.5 font-medium border-emerald-500/30 dark:border-emerald-500/20 bg-emerald-500/15 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                                >
-                                  <ShieldCheck className="size-2.5" /> ZK
-                                </Badge>
-                              )}
+                              <Badge
+                                variant="outline"
+                                className="text-[9px] h-4 px-1.5 font-medium border-emerald-500/30 dark:border-emerald-500/20 bg-emerald-500/15 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                              >
+                                <ShieldCheck className="size-2.5" /> ZK
+                              </Badge>
                             </div>
                             <p className="text-xs text-muted-foreground truncate">
                               {v.description ?? ""}
@@ -415,7 +419,7 @@ export default function DashboardPage() {
                         key={ev.id}
                         className="flex items-center gap-3 px-4 py-3"
                       >
-                        <div className="size-7 rounded-full bg-gradient-to-br from-white/[0.08] to-white/[0.02] border border-line-1 flex items-center justify-center text-[10px] font-semibold shrink-0">
+                        <div className="size-7 rounded-full bg-surface-2 border border-line-1 flex items-center justify-center text-[10px] font-semibold shrink-0">
                           {initials}
                         </div>
                         <div className="flex-1 min-w-0 text-sm">

@@ -37,6 +37,24 @@ export interface VaultSummary {
   itemCount: number;
   memberCount: number;
   encryptionVersion: number;
+  /**
+   * Monotonic vault-key generation (Phase C Wave-2b). Echoed as
+   * `expectedKeyVersion` on a re-key / migrate. v1 vaults default to 1.
+   */
+  keyVersion?: number;
+  /**
+   * True after a member was revoked from a v2 vault — the vault needs a
+   * client-driven re-key (`POST /vaults/:id/rekey`) to rotate the key and
+   * re-encrypt every item (AC-024.5). Cleared once the re-key succeeds.
+   */
+  rekeyPending?: boolean;
+  /**
+   * ISO deadline of the v1→v2 migration rollback window (30 days). Present on a
+   * migrated v2 vault that can still be reverted (`POST /vaults/:id/migrate/rollback`).
+   * Absent/undefined when never migrated or the window elapsed. Lets the rollback
+   * affordance survive a page refresh instead of living only in session state.
+   */
+  rollbackAvailableUntil?: string | null;
   role: VaultRole;
   createdAt: string;
   updatedAt: string;
@@ -118,6 +136,15 @@ export interface FolderUpdateInput {
 /** Item types — backend persists all six verbatim (FR-030). */
 export type ItemType = "login" | "note" | "api_key" | "ssh" | "card" | "identity";
 
+/**
+ * Server-computed password-rotation badge state (US-060 / AC-060.3):
+ *   "none"    — no policy applies OR no password (no badge)
+ *   "fresh"   — 🟢 due date > 14 days away
+ *   "due"     — 🟡 within 14 days of the due date (inclusive)
+ *   "overdue" — 🔴 due date has passed
+ */
+export type RotationStatus = "none" | "fresh" | "due" | "overdue";
+
 export interface ItemActor {
   id: string;
   displayName: string;
@@ -151,6 +178,17 @@ export interface ItemSummary {
    * `passwordCiphertext` (US-015 / FR-037).
    */
   passwordChangedAt: string | null;
+  /**
+   * US-060 / AC-060.1-3 — password rotation policy + server-computed status.
+   * `rotationPolicyDays`: the item's OWN window (days), or null = inherit the
+   * org default (`rotationDefaultDays`). `rotationStatus` drives the 🟢🟡🔴
+   * badge ("none" = no badge). `rotationDueAt` = passwordChangedAt + effective
+   * days, or null when status is "none". Optional on the wire for legacy
+   * responses that pre-date Phase C.
+   */
+  rotationPolicyDays?: number | null;
+  rotationStatus?: RotationStatus;
+  rotationDueAt?: string | null;
   createdBy: ItemActor;
   /**
    * The caller's effective role on THIS item — "most specific wins":
@@ -161,6 +199,19 @@ export interface ItemSummary {
   effectiveRole?: VaultRole;
   /** Optional expiry for temporary access. */
   expiresAt?: string | null;
+
+  /**
+   * Phase C ZK (encryptionVersion=2) metadata ciphertext. When `nameCiphertext`
+   * is non-null the plaintext `name`/`username`/`url` are blanked server-side
+   * (`""`/null); the client decrypts these with the vault key for display. v1
+   * items leave them null and use the plaintext columns. (FR-043)
+   */
+  nameCiphertext?: string | null;
+  nameIv?: string | null;
+  usernameCiphertext?: string | null;
+  usernameIv?: string | null;
+  urlCiphertext?: string | null;
+  urlIv?: string | null;
 }
 
 /**
@@ -197,10 +248,36 @@ export interface ItemCreateInput {
   notesIv?: string;
 
   /**
+   * Phase C ZK metadata ciphertext (FR-043). Sent alongside `name: ""` for v2
+   * vaults; the server blanks the plaintext columns and stores these verbatim.
+   * On PATCH, sending `nameCiphertext` re-encrypts the name and scrubs the
+   * plaintext; `usernameCiphertext`/`urlCiphertext` accept `null` to clear.
+   */
+  nameCiphertext?: string | null;
+  nameIv?: string | null;
+  usernameCiphertext?: string | null;
+  usernameIv?: string | null;
+  urlCiphertext?: string | null;
+  urlIv?: string | null;
+  /**
+   * Blind-index tokens (base64 HMAC-SHA256). On create this seeds the index; on
+   * PATCH, present (even `[]`) REPLACES the item's whole term set, omitted leaves
+   * it untouched. Computed client-side via `computeSearchTerms`.
+   */
+  searchTerms?: string[];
+
+  /**
    * Optional folder id within the same vault. The backend returns
    * `404 not_found` if the folder belongs to a different vault.
    */
   folderId?: string | null;
+
+  /**
+   * US-060 / AC-060.1 — per-item rotation window in days. `null`/`0`/omitted =
+   * inherit the org default. Clamped server-side to [1, 3650]. Metadata-only on
+   * PATCH (does NOT reset `passwordChangedAt` or snapshot a version).
+   */
+  rotationPolicyDays?: number | null;
 }
 
 /**
@@ -258,6 +335,17 @@ export interface ItemVersionContent {
   passwordIv?: string | null;
   notesCiphertext?: string | null;
   notesIv?: string | null;
+  /**
+   * ZK metadata-ciphertext snapshot (Wave-2a). When non-null the snapshot's
+   * `name`/`username`/`url` are blanked; the client decrypts these. Legacy v2
+   * snapshots return null here → fall back to the plaintext fields.
+   */
+  nameCiphertext?: string | null;
+  nameIv?: string | null;
+  usernameCiphertext?: string | null;
+  usernameIv?: string | null;
+  urlCiphertext?: string | null;
+  urlIv?: string | null;
 }
 
 /**

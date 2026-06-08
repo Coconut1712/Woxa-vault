@@ -1,6 +1,7 @@
 - [Shared helpers](shared-helpers.md) — common helpers (getClientIp, currentOrgForUser, hashIp) live in `src/lib/`, not in route files
 - [Anti-enumeration 404 pattern](anti-enumeration-404.md) — return 404, not 403, for resources outside the caller's tenant
 - [Atomic burn pattern for sends](atomic-burn-pattern.md) — single SQL UPDATE with guard predicates handles view-count race safely
+- [Send item attribution](send-item-attribution.md) — POST /sends optional itemId attributes the CREATE audit event to the source item (shows in /items/:id/activity); lenient fallback
 - [Test seed](test-seed.md) — `dev@iux24.com` / `WoxaVault!Dev2026` in org `woxa` with role `owner`
 - [Migration batch is atomic](migration-batch-atomic.md) — one failing migration rolls back ALL pending ones in a db:migrate run; fix data blocker then re-run
 - [Dev DB access](dev-db-access.md) — reach dev Postgres via `docker exec woxa-vault-postgres psql`; no host psql; heredoc stdin no-ops, use -c; table is `organizations` not `orgs`

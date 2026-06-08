@@ -71,7 +71,7 @@ export const vaults: Vault[] = [
     color: "fuchsia",
     itemCount: 22,
     memberCount: 4,
-    encryptionVersion: 1,
+    encryptionVersion: 2,
   },
 ];
 

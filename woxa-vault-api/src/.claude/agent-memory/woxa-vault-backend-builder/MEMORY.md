@@ -1,0 +1,4 @@
+- [ZK blind-index search](project_zk_blind_index.md) — Phase C v2 metadata encryption + HMAC blind index (FR-043); schema, endpoints, client token contract
+- [Rotation tracking](project_rotation_tracking.md) — US-060/FR-039 rotation status compute, /items/rotation-due, org default in settings, email digest (not scheduled yet)
+- [item_versions v2 metadata](project_item_versions_v2_metadata.md) — versions snapshot v2 ciphertext-metadata; reveal returns it; versions never searchable
+- [Vault re-key & migration](project_vault_rekey_migration.md) — Wave-2b AC-024.5: client-driven /vaults/:id/rekey, revoke→rekeyPending, reversible v1→v2 /migrate+/rollback

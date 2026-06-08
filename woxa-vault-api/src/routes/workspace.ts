@@ -18,7 +18,7 @@ import {
   vaults,
 } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { logger } from "@/lib/logger";
 import {
@@ -31,6 +31,7 @@ import {
   AUTO_LOCK_MAX,
   AUTO_LOCK_MIN,
   clampAutoLockMinutes,
+  clampRotationDays,
   mergeOrgSettings,
   normalizeAllowedDomains,
   readOrgPolicy,
@@ -142,6 +143,9 @@ export const deleteWorkspaceSchema = z.object({
 export const securityPolicySchema = z.object({
   require2fa: z.boolean().optional(),
   autoLockMinutes: z.number().int().optional(),
+  // US-060 / AC-060.1: org-wide default rotation window (days). null/0 = no
+  // default. Clamped server-side (clampRotationDays).
+  rotationDefaultDays: z.number().int().nullable().optional(),
   sso: z
     .object({
       allowedDomains: z.array(z.string()).max(100).optional(),
@@ -349,7 +353,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
   .patch("/", jsonValidator(renameSchema), async (c) => {
     const user = c.get("user")!;
     const { name } = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     const current = await activeOrgForContext(c);
@@ -391,6 +395,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
             targetId: current.orgId,
             targetName: name,
             ipHash,
+            ipMasked,
             userAgent,
             success: true,
             metadata: {
@@ -479,7 +484,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
   .delete("/", jsonValidator(deleteWorkspaceSchema), async (c) => {
     const user = c.get("user")!;
     const { confirmName, password } = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     // Two-tier rate limit (mirrors transfer-ownership).
@@ -527,6 +532,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         targetId: current.orgId,
         targetName: orgRow.name,
         ipHash,
+        ipMasked,
         userAgent,
         success: false,
         metadata: { reason: "wrong_password" },
@@ -575,6 +581,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         targetId: current.orgId,
         targetName: orgRow.name,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
         metadata: { slug: orgRow.slug },
@@ -602,7 +609,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
   .post("/", jsonValidator(createSchema), async (c) => {
     const user = c.get("user")!;
     const { name } = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     const RL_KEY = `workspace-create:${user.id}`;
@@ -664,6 +671,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         targetId: orgRow.id,
         targetName: orgRow.name,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
         metadata: { slug: orgRow.slug, defaultVaults: defaultVaultNames.length },
@@ -789,6 +797,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
       settings: {
         require2fa: policy.require2fa,
         autoLockMinutes: policy.autoLockMinutes,
+        rotationDefaultDays: policy.rotationDefaultDays,
         sso: {
           allowedDomains: policy.sso.allowedDomains,
           jitEnabled: policy.sso.jitEnabled,
@@ -831,7 +840,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
   .patch("/settings", jsonValidator(securityPolicySchema), async (c) => {
     const user = c.get("user")!;
     const body = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     const RL_KEY = `workspace-policy:${user.id}`;
@@ -880,6 +889,15 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
       if (clamped !== before.autoLockMinutes) {
         patch.autoLockMinutes = clamped;
         changedKeys.push("autoLockMinutes");
+      }
+    }
+
+    // US-060: org default rotation window. 0/negative/garbage → null (no default).
+    if (body.rotationDefaultDays !== undefined) {
+      const clamped = clampRotationDays(body.rotationDefaultDays);
+      if (clamped !== before.rotationDefaultDays) {
+        patch.rotationDefaultDays = clamped;
+        changedKeys.push("rotationDefaultDays");
       }
     }
 
@@ -934,6 +952,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
           targetId: current.orgId,
           targetName: orgRow.name,
           ipHash,
+          ipMasked,
           userAgent,
           success: true,
           metadata: {
@@ -946,6 +965,14 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
                   autoLockMinutes: {
                     from: before.autoLockMinutes,
                     to: patch.autoLockMinutes,
+                  },
+                }
+              : {}),
+            ...(patch.rotationDefaultDays !== undefined
+              ? {
+                  rotationDefaultDays: {
+                    from: before.rotationDefaultDays,
+                    to: patch.rotationDefaultDays,
                   },
                 }
               : {}),
@@ -970,6 +997,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
       settings: {
         require2fa: after.require2fa,
         autoLockMinutes: after.autoLockMinutes,
+        rotationDefaultDays: after.rotationDefaultDays,
         sso: {
           allowedDomains: after.sso.allowedDomains,
           jitEnabled: after.sso.jitEnabled,
@@ -1010,7 +1038,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
   .patch("/integrations/slack", jsonValidator(slackIntegrationSchema), async (c) => {
     const user = c.get("user")!;
     const body = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     const RL_KEY = `workspace-integration:${user.id}`;
@@ -1065,6 +1093,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         targetId: current.orgId,
         targetName: orgRow.name,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
         metadata: {
@@ -1094,7 +1123,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
   // ------------------------------------------------------------------
   .post("/integrations/slack/test", async (c) => {
     const user = c.get("user")!;
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     const RL_KEY = `workspace-integration-test:${user.id}`;
@@ -1159,6 +1188,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
       targetId: current.orgId,
       targetName: orgRow.name,
       ipHash,
+      ipMasked,
       userAgent,
       success: true,
       metadata: { integration: "slack" },
@@ -1175,7 +1205,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
   .post("/transfer-ownership", jsonValidator(transferSchema), async (c) => {
     const user = c.get("user")!;
     const { targetUserId, password } = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     // HIGH#1: two-tier rate limit (mirrors /me/sessions/revoke-all).
@@ -1227,6 +1257,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "user",
         targetId: targetUserId,
         ipHash,
+        ipMasked,
         userAgent,
         success: false,
         metadata: { reason: "wrong_password", to: targetUserId },
@@ -1282,6 +1313,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
           targetType: "user",
           targetId: targetUserId,
           ipHash,
+          ipMasked,
           userAgent,
           success: true,
           metadata: { from: user.id, to: targetUserId, previousRole: target.role },
@@ -1345,7 +1377,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
     const user = c.get("user")!;
     const sessionToken = c.get("sessionToken");
     const { orgId } = c.req.valid("json");
-    const ipHash = hashIp(getClientIp(c));
+    const { ipHash, ipMasked } = clientIpAuditFields(c);
     const userAgent = c.req.header("user-agent") ?? null;
 
     const RL_KEY = `workspace-switch:${user.id}`;
@@ -1390,6 +1422,7 @@ export const workspaceRoutes = new Hono<{ Variables: AuthVariables }>()
         targetId: orgId,
         targetName: orgRow.name,
         ipHash,
+        ipMasked,
         userAgent,
         success: true,
         metadata: { role: membership.role },

@@ -4,7 +4,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { db } from "@/db/client";
 import { auditEvents, folderMembers, folderTeamMembers, folders, teamMembers, teams, users, vaults, type Folder } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { getOrgMembership } from "@/lib/orgAccess";
 import {
@@ -200,7 +200,7 @@ export const folderMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "folder.share", targetType: "folder", targetId: id, targetName: ctx.folder.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { granteeUserId: body.userId, granteeEmail, role: body.role },
       });
       await createNotification(tx, {
@@ -236,7 +236,7 @@ export const folderMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "folder.team_share", targetType: "folder", targetId: id, targetName: ctx.folder.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { granteeTeamId: body.teamId, granteeTeamName: team.name, role: body.role },
       });
 
@@ -273,7 +273,7 @@ export const folderMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "folder.role_change", targetType: "folder", targetId: id, targetName: ctx.folder.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { granteeUserId: userId, granteeEmail: target.email, from: target.role, to: role },
       });
       await createNotification(tx, {
@@ -306,7 +306,7 @@ export const folderMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "folder.team_role_change", targetType: "folder", targetId: id, targetName: ctx.folder.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { granteeTeamId: teamId, granteeTeamName: target.teamName, from: target.role, to: role },
       });
 
@@ -342,7 +342,7 @@ export const folderMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "folder.revoke", targetType: "folder", targetId: id, targetName: ctx.folder.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { revokedUserId: userId, revokedEmail: target.email, role: target.role },
       });
       await createNotification(tx, {
@@ -373,7 +373,7 @@ export const folderMemberRoutes = new Hono<{ Variables: AuthVariables }>()
       await tx.insert(auditEvents).values({
         orgId: viewer.vault.orgId, actorUserId: user.id, actorEmail: user.email,
         action: "folder.team_revoke", targetType: "folder", targetId: id, targetName: ctx.folder.name,
-        ipHash: hashIp(getClientIp(c)), userAgent: c.req.header("user-agent") ?? null, success: true,
+        ...clientIpAuditFields(c), userAgent: c.req.header("user-agent") ?? null, success: true,
         metadata: { revokedTeamId: teamId, revokedTeamName: target.teamName, role: target.role },
       });
 

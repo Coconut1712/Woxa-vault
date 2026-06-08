@@ -28,12 +28,51 @@ export interface LoginInfo {
     memorySize: number;
     parallelism: number;
   };
+  /**
+   * VAULT-UNLOCK master-factor signal: a legacy `auth_key_hash` is present, so
+   * the lock screen must use the zero-knowledge verify-password shape (never
+   * send the master password as plaintext). This field is for vault unlock —
+   * it must NOT drive LOGIN factor selection (see `hasLoginPassword`).
+   */
   requiresZk: boolean;
+  /**
+   * LOGIN-factor signal: a `login_password_hash` is set, so sign-in sends the
+   * plaintext login password (checked server-side against that hash). This is
+   * the normal login path and is independent of `requiresZk` — an account can
+   * have both a login password and a legacy `auth_key_hash`. Optional in the
+   * type to tolerate an older backend that predates the field; callers fall
+   * back to `requiresZk`-based behaviour when it is `undefined`.
+   */
+  hasLoginPassword?: boolean;
+  /**
+   * Phase C crypto fix #2: server-issued per-user Argon2id salt (base64). Used
+   * as the `salt` argument to `deriveMasterKey`. For unknown emails the server
+   * returns a deterministic decoy salt (anti-enumeration), so this field is
+   * always present pre-login. Optional in the type only to tolerate an older
+   * backend that predates the field — callers must guard for `undefined`.
+   */
+  kdfSalt?: string;
 }
 
-/** GET /auth/login-info — pre-login salt/KDF lookup. */
+/** GET /auth/login-info — pre-login salt/KDF lookup (includes kdfSalt). */
 export async function getLoginInfo(email: string): Promise<LoginInfo> {
   return apiFetch<LoginInfo>(`/auth/login-info?email=${encodeURIComponent(email)}`);
+}
+
+/**
+ * GET /auth/kdf-salt?email= — pre-login per-user KDF salt lookup.
+ *
+ * Returns the base64 salt the client must feed to `deriveMasterKey`. The server
+ * answers with a deterministic decoy salt for unknown emails so an attacker
+ * cannot use this endpoint to enumerate accounts. The login flow normally reads
+ * `kdfSalt` straight off `getLoginInfo`; this standalone helper exists for flows
+ * that only need the salt.
+ */
+export async function getKdfSalt(email: string): Promise<string> {
+  const res = await apiFetch<{ kdfSalt: string }>(
+    `/auth/kdf-salt?email=${encodeURIComponent(email)}`,
+  );
+  return res.kdfSalt;
 }
 
 interface AuthUserResponse {

@@ -139,14 +139,14 @@ describe("Notifications system (integration)", () => {
     });
     await deps.db.insert(deps.orgMembers).values({ orgId, userId, role: orgRole });
     createdUserIds.push(userId);
-    const { token } = await deps.createSession(userId);
+    const { token } = await deps.createSession(userId, {}, true);
     return { userId, email, cookie: `${deps.SESSION_COOKIE_NAME}=${token}` };
   }
 
   async function makeVault(createdBy: string): Promise<string> {
     const [v] = await deps.db
       .insert(deps.vaults)
-      .values({ orgId, name: `vault-${randomUUID().slice(0, 8)}`, createdBy })
+      .values({ orgId, name: `vault-${randomUUID().slice(0, 8)}`, createdBy, encryptionVersion: 1 })
       .returning();
     createdVaultIds.push(v!.id);
     return v!.id;

@@ -21,7 +21,7 @@ import {
   type Vault,
 } from "@/db/schema";
 import { errors } from "@/lib/errors";
-import { hashIp } from "@/lib/ipHash";
+import { clientIpAuditFields } from "@/lib/ipHash";
 import { getClientIp } from "@/lib/clientIp";
 import { jsonValidator, paramValidator } from "@/lib/validator";
 import {
@@ -29,6 +29,7 @@ import {
   blockGuestWrites,
   requireAuth,
   requireTwoFactorEnrolled,
+  requireVaultUnlocked,
   type AuthVariables,
 } from "@/middleware/auth";
 import { getOrgMembership } from "@/lib/orgAccess";
@@ -234,6 +235,11 @@ interface VaultSummary {
   itemCount: number;
   memberCount: number;
   encryptionVersion: number;
+  // Phase C Wave-2b: monotonic vault-key generation (the value a rekey payload
+  // must echo as expectedKeyVersion) + the "needs re-key" flag set when
+  // a member was revoked from a v2 vault (AC-024.5).
+  keyVersion: number;
+  rekeyPending: boolean;
   role: Role;
   createdAt: string;
   updatedAt: string;
@@ -258,14 +264,24 @@ function toSummary(
     itemCount,
     memberCount,
     encryptionVersion: v.encryptionVersion,
+    keyVersion: v.keyVersion,
+    rekeyPending: v.rekeyPending,
     role,
     createdAt: v.createdAt.toISOString(),
     updatedAt: v.updatedAt.toISOString(),
   };
 }
 
-function toFull(v: Vault, role: Role, itemCount: number, memberCount: number): VaultFull {
-  return { ...toSummary(v, role, itemCount, memberCount), createdBy: v.createdBy };
+function toFull(
+  v: Vault,
+  role: Role,
+  itemCount: number,
+  memberCount: number,
+): VaultFull {
+  return {
+    ...toSummary(v, role, itemCount, memberCount),
+    createdBy: v.createdBy,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -277,8 +293,8 @@ const createSchema = z.object({
   description: z.string().trim().max(500).nullable().optional(),
   iconKey: z.string().trim().max(60).nullable().optional(),
   color: colorSchema.nullable().optional(),
-  // Phase C: ZK fields
-  encryptionVersion: z.number().optional(),
+  // Phase C: ZK fields. All vaults are zero-knowledge (v2); the client no
+  // longer negotiates an encryption version.
   wrappedKey: z.string().optional(), // base64
 });
 
@@ -430,7 +446,9 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
           iconKey: body.iconKey ?? null,
           color: body.color ?? null,
           createdBy: user.id,
-          encryptionVersion: body.encryptionVersion ?? 1,
+          // All vaults are zero-knowledge (v2). Server-side envelope encryption
+          // (v1) is no longer supported.
+          encryptionVersion: 2,
         })
         .returning();
       if (!vaultRow) throw new Error("vault insert returned no row");
@@ -459,7 +477,7 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "vault",
         targetId: vaultRow.id,
         targetName: vaultRow.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
         metadata: { encryptionVersion: vaultRow.encryptionVersion },
@@ -500,7 +518,7 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
       .innerJoin(users, eq(users.id, vaultMembers.userId))
       .where(eq(vaultMembers.vaultId, id));
 
-    // Phase C: If ZK, fetch wrapped key for the caller
+    // Phase C: fetch the caller's wrapped vault key (all vaults are ZK/v2).
     let wrappedKey: string | null = null;
     if (access.vault.encryptionVersion === 2) {
       const k = await db.query.vaultKeys.findFirst({
@@ -539,7 +557,7 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "vault",
         targetId: id,
         targetName: access.vault.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: false,
         metadata: { reason: "insufficient_role", role: access.role },
@@ -589,7 +607,7 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
       targetType: "vault",
       targetId: updated.id,
       targetName: updated.name,
-      ipHash: hashIp(getClientIp(c)),
+      ...clientIpAuditFields(c),
       userAgent: c.req.header("user-agent") ?? null,
       success: true,
       metadata: { fields: Object.keys(body) },
@@ -614,7 +632,11 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
     });
   })
 
-  .delete("/:id", paramValidator(uuidParam), async (c) => {
+  // HIGH finding: destructive vault deletion is gated by `requireVaultUnlocked`
+  // so a session-thief on a stolen cookie (who never proved the master
+  // password) cannot wipe a vault by hitting the JSON API directly. Returns 401
+  // `vault_locked` until POST /me/verify-password stamps a fresh unlock.
+  .delete("/:id", requireVaultUnlocked, paramValidator(uuidParam), async (c) => {
     const user = c.get("user")!;
     const { id } = c.req.valid("param");
 
@@ -629,7 +651,7 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "vault",
         targetId: id,
         targetName: access.vault.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: false,
         metadata: { reason: "insufficient_role", role: access.role },
@@ -652,7 +674,7 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "vault",
         targetId: id,
         targetName: access.vault.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: false,
         metadata: { reason: "vault_not_empty", itemCount },
@@ -681,7 +703,7 @@ export const vaultRoutes = new Hono<{ Variables: AuthVariables }>()
         targetType: "vault",
         targetId: id,
         targetName: access.vault.name,
-        ipHash: hashIp(getClientIp(c)),
+        ...clientIpAuditFields(c),
         userAgent: c.req.header("user-agent") ?? null,
         success: true,
       });

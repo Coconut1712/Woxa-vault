@@ -41,8 +41,8 @@ const envSchema = z.object({
   // Fly.io, an AWS ALB, etc.). When false the API derives the peer IP from
   // the socket address only — this prevents anonymous callers from spoofing
   // their IP and bypassing rate limits. CF-Connecting-IP and Fly-Client-IP
-  // are always preferred when present (Cloudflare/Fly inject these and they
-  // cannot be set by upstream clients).
+  // are preferred when present BUT only while TRUST_PROXY is on — direct-to-
+  // origin clients can forge them too, so they are not trusted unattested.
   TRUST_PROXY: z
     .string()
     .default("false")

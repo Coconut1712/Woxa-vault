@@ -40,6 +40,12 @@ export interface SendCreateInput {
   maxViews?: number;
   /** Optional gate; omit or empty string → no password. */
   password?: string;
+  /**
+   * Optional source item this send was built from. When supplied and the
+   * caller can access it, the backend logs the create audit against the item
+   * (targetType:'item') so "Created send" appears in that item's activity.
+   */
+  itemId?: string;
 }
 
 /**

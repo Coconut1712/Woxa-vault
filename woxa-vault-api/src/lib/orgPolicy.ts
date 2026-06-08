@@ -25,6 +25,27 @@ import { organizations, orgMembers, users } from "@/db/schema";
 //     only ever set to `true` through the validated PATCH path.
 // ---------------------------------------------------------------------------
 
+// Org-wide DEFAULT rotation policy (US-060 / FR-039), in days. Applies to any
+// item whose own `rotationPolicyDays` is NULL. 0 / null / unset = "no default
+// policy" (items inherit nothing → rotationStatus `none`). The per-item value
+// always wins when present (including an explicit 0 = opt OUT of any policy).
+// Bounded to a sane band so a typo can't make every secret instantly overdue
+// (1 day) or set an effectively-infinite window.
+export const ROTATION_DAYS_MIN = 1;
+export const ROTATION_DAYS_MAX = 3650; // 10 years
+
+// Clamp a candidate rotation-days value into [MIN, MAX] OR return null for
+// "no policy" (0 / null / negative / non-finite). Used by both the org-default
+// reader and the per-item PATCH/create validation so the rules stay in one place.
+export function clampRotationDays(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const rounded = Math.round(value);
+  if (rounded <= 0) return null; // 0 / negative = explicitly "no policy"
+  if (rounded < ROTATION_DAYS_MIN) return ROTATION_DAYS_MIN;
+  if (rounded > ROTATION_DAYS_MAX) return ROTATION_DAYS_MAX;
+  return rounded;
+}
+
 // Vault auto-lock idle window (minutes) bounds. The client reads
 // `autoLockMinutes` from GET /workspace/settings to drive its idle overlay
 // timer; the value is also a candidate for the server-side unlock window (see
@@ -85,6 +106,8 @@ export const orgSettingsSchema = z
   .object({
     require2fa: z.boolean().optional(),
     autoLockMinutes: z.number().optional(),
+    // US-060 / FR-039: org-wide default rotation window (days). null/0 = none.
+    rotationDefaultDays: z.number().nullable().optional(),
     sso: z
       .object({
         allowedDomains: z.array(z.string()).optional(),
@@ -103,12 +126,16 @@ export type OrgSettings = z.infer<typeof orgSettingsSchema>;
 export interface OrgSecurityPolicy {
   require2fa: boolean;
   autoLockMinutes: number;
+  // US-060 / FR-039: org default rotation window in days. null = no default
+  // (items with no own policy resolve to rotationStatus `none`).
+  rotationDefaultDays: number | null;
   sso: OrgSsoPolicy;
 }
 
 const SAFE_DEFAULT: OrgSecurityPolicy = {
   require2fa: false,
   autoLockMinutes: AUTO_LOCK_DEFAULT,
+  rotationDefaultDays: null,
   sso: { allowedDomains: [], jitEnabled: true, requireSso: false },
 };
 
@@ -116,6 +143,7 @@ function safeDefaultCopy(): OrgSecurityPolicy {
   return {
     require2fa: false,
     autoLockMinutes: AUTO_LOCK_DEFAULT,
+    rotationDefaultDays: null,
     sso: { allowedDomains: [], jitEnabled: true, requireSso: false },
   };
 }
@@ -137,6 +165,7 @@ export function readOrgPolicy(settings: unknown): OrgSecurityPolicy {
   return {
     require2fa: d.require2fa === true,
     autoLockMinutes: clampAutoLockMinutes(d.autoLockMinutes),
+    rotationDefaultDays: clampRotationDays(d.rotationDefaultDays),
     sso: {
       allowedDomains: normalizeAllowedDomains(ssoRaw.allowedDomains),
       // Missing / non-boolean → true (current behavior). Only explicit false off.

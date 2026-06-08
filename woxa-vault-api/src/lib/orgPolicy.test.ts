@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AUTO_LOCK_DEFAULT,
   clampAutoLockMinutes,
+  clampRotationDays,
+  ROTATION_DAYS_MAX,
   mergeOrgSettings,
   normalizeAllowedDomains,
   orgSettingsSchema,
@@ -20,8 +22,23 @@ describe("readOrgPolicy — fail-safe default", () => {
     expect(readOrgPolicy({})).toEqual({
       require2fa: false,
       autoLockMinutes: AUTO_LOCK_DEFAULT,
+      rotationDefaultDays: null,
       sso: DEFAULT_SSO,
     });
+  });
+
+  it("rotationDefaultDays: positive passes; 0/negative/garbage → null; clamped to max (US-060)", () => {
+    expect(readOrgPolicy({ rotationDefaultDays: 90 }).rotationDefaultDays).toBe(90);
+    expect(readOrgPolicy({ rotationDefaultDays: 0 }).rotationDefaultDays).toBeNull();
+    expect(readOrgPolicy({ rotationDefaultDays: -5 }).rotationDefaultDays).toBeNull();
+    expect(readOrgPolicy({ rotationDefaultDays: null }).rotationDefaultDays).toBeNull();
+    expect(readOrgPolicy({}).rotationDefaultDays).toBeNull();
+    expect(readOrgPolicy({ rotationDefaultDays: ROTATION_DAYS_MAX + 1000 }).rotationDefaultDays).toBe(ROTATION_DAYS_MAX);
+    // Direct clamp helper.
+    expect(clampRotationDays(30)).toBe(30);
+    expect(clampRotationDays(0)).toBeNull();
+    expect(clampRotationDays("90")).toBeNull();
+    expect(clampRotationDays(30.6)).toBe(31); // rounds
   });
 
   it("defaults to false for null / undefined", () => {

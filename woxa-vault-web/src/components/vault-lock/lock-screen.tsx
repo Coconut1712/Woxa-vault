@@ -47,16 +47,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, NetworkError } from "@/lib/api/client";
 import { verifyPassword } from "@/lib/api/me";
-import { getLoginInfo } from "@/lib/api/auth";
+import { getLoginInfo, getKdfSalt } from "@/lib/api/auth";
 import { useAuth } from "@/lib/auth/provider";
 import { useT } from "@/lib/i18n/provider";
 import { useVaultLock, type LockReason, persistPrivateKey } from "./lock-provider";
-import { 
-  deriveMasterKey, 
-  deriveAuthKeyHash, 
-  decryptPrivateKey, 
-  fromBase64 
+import {
+  deriveMasterKey,
+  deriveAuthKeyHash,
+  decryptPrivateKey,
+  fromBase64
 } from "@/lib/crypto-client";
+import { resolveUnlockKeys } from "@/lib/vault-lock/resolve-unlock-keys";
 
 /**
  * After a 429 we hold submit for this long to avoid spinning the backend
@@ -174,28 +175,62 @@ export function VaultLockScreen() {
         if (!email) throw new Error("No user email found");
         
         const info = await getLoginInfo(email);
-        let verifyPayload: { password?: string; masterAuthKeyHash?: string; lockReason: LockReason } = { lockReason };
-        let masterKey: Uint8Array | null = null;
 
-        if (info.requiresZk) {
-          masterKey = await deriveMasterKey(submittedPassword, info.userId);
-          verifyPayload.masterAuthKeyHash = await deriveAuthKeyHash(masterKey, info.userId);
-        } else {
-          verifyPayload.password = submittedPassword;
-        }
+        // ALWAYS derive the master key from the typed Master password + the
+        // per-user KDF salt, independent of `requiresZk`. The verify-password
+        // endpoint checks the typed password against `user.passwordHash` (the
+        // Master password), and the private-key blob in `userKeys` is wrapped
+        // with KDF(masterPassword, salt) — so whenever the server returns
+        // `res.keys` we can decrypt + persist the private key, regardless of
+        // which factor shape the verify payload used.
+        //
+        // `requiresZk` ONLY decides the verify payload shape:
+        //   - true  → send a derived masterAuthKeyHash (zero-knowledge factor)
+        //   - false → send the plaintext Master password
+        // It does NOT gate private-key persistence (that was the bug: the
+        // private key never landed in sessionStorage on the non-ZK branch, so
+        // getVaultKey() returned null and v2 saves hit VaultLockedError even
+        // though the overlay had cleared).
+        const saltB64 = info.kdfSalt ?? (await getKdfSalt(email));
+        const salt = fromBase64(saltB64);
+
+        // Derive the master key at most ONCE per unlock. The ZK branch needs it
+        // to build the masterAuthKeyHash factor; resolveUnlockKeys needs it to
+        // unwrap the private key. deriveMasterKey is Argon2id (expensive), so we
+        // derive it here and hand the result to resolveUnlockKeys to avoid a
+        // second derivation (the non-ZK branch leaves it undefined and lets the
+        // helper derive lazily, since it skips the ZK factor work).
+        const masterKey = info.requiresZk
+          ? await deriveMasterKey(submittedPassword, salt)
+          : undefined;
+
+        const verifyPayload: { password?: string; masterAuthKeyHash?: string; lockReason: LockReason } =
+          info.requiresZk && masterKey
+            ? {
+                lockReason,
+                masterAuthKeyHash: await deriveAuthKeyHash(masterKey, salt),
+              }
+            : { lockReason, password: submittedPassword };
 
         const res = await verifyPassword(verifyPayload);
 
-        // If ZK keys were returned, decrypt and persist the private key
-        if (masterKey && res.keys) {
-          const pk = await decryptPrivateKey({
-            ciphertext: fromBase64(res.keys.encryptedPrivateKey),
-            iv: fromBase64(res.keys.privateKeyIv),
-            authTag: fromBase64(res.keys.privateKeyAuthTag),
-          }, masterKey);
-          
-          persistPrivateKey(pk);
-        }
+        // Persist the private key whenever the server returns a keypair —
+        // this is what later lets getVaultKey() unwrap v2 vault keys. Runs on
+        // BOTH the ZK and non-ZK branches (the latter was the bug). A decrypt
+        // failure here MUST NOT block the unlock: a v1-only user or a user
+        // without a keypair must still unlock, and the save path already
+        // guards missing keys with VaultLockedError.
+        await resolveUnlockKeys(
+          { masterPassword: submittedPassword, salt, keys: res.keys, masterKey },
+          {
+            deriveMasterKey,
+            decryptPrivateKey,
+            fromBase64,
+            persistPrivateKey,
+            onDecryptError: (keyErr) =>
+              console.error("Failed to decrypt private key on unlock", keyErr),
+          },
+        );
 
         // Verify succeeded — the closure local is the last reference; it
         // goes out of scope when this callback returns.

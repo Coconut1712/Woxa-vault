@@ -242,6 +242,7 @@ export default function SendsPage() {
           )}
         </div>
       </div>
+
     </>
   );
 }
@@ -256,8 +257,8 @@ function StatCard({
   color: "blue" | "orange" | "muted";
 }) {
   const colors = {
-    blue: "text-blue-600",
-    orange: "text-orange-600",
+    blue: "text-blue-600 dark:text-blue-400",
+    orange: "text-amber-600 dark:text-amber-400",
     muted: "text-muted-foreground",
   };
   return (
@@ -276,14 +277,14 @@ function StatusBadge({ status }: { status: SendStatus }) {
   const t = useT();
   if (status === "active") {
     return (
-      <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
+      <Badge variant="outline" className="bg-emerald-500/15 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 dark:border-emerald-500/20">
         <Clock className="size-3" /> {t("sends.status.active")}
       </Badge>
     );
   }
   if (status === "burned") {
     return (
-      <Badge variant="outline" className="bg-orange-50 text-orange-700 border-orange-200">
+      <Badge variant="outline" className="bg-amber-500/15 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 dark:border-amber-500/20">
         <Flame className="size-3" /> {t("sends.status.burned")}
       </Badge>
     );

@@ -1,14 +1,12 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { and, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { auditEvents, orgMembers } from "@/db/schema";
 import type { SQL } from "drizzle-orm";
 import { errors } from "@/lib/errors";
 import { canViewAllOrgAudit } from "@/lib/orgAccess";
 import { queryValidator } from "@/lib/validator";
-import { hashIp } from "@/lib/ipHash";
-import { getClientIp } from "@/lib/clientIp";
 import { activeOrgForContext, requireAuth, type AuthVariables } from "@/middleware/auth";
 
 // (drizzle infers AuditEvent select shape via the table import.)
@@ -27,6 +25,9 @@ export interface AuditEventDTO {
   targetId: string | null;
   targetName: string | null;
   ipHash: string | null;
+  // Masked display string (first two octets/hextets; full IP never stored).
+  // The frontend renders this in the IP column; `ipHash` stays for correlation.
+  ipMasked: string | null;
   userAgent: string | null;
   success: boolean;
   metadata: unknown;
@@ -47,6 +48,7 @@ export function toAuditDto(r: AuditEventRow): AuditEventDTO {
     targetId: r.targetId,
     targetName: r.targetName,
     ipHash: r.ipHash,
+    ipMasked: r.ipMasked ?? null,
     userAgent: r.userAgent,
     success: r.success,
     metadata: r.metadata,
@@ -55,55 +57,42 @@ export function toAuditDto(r: AuditEventRow): AuditEventDTO {
 }
 
 // ---------------------------------------------------------------------------
-// GET /audit — keyset-paginated audit log viewer (REQUIREMENTS §4.7).
+// GET /audit — PAGE-based audit log viewer (REQUIREMENTS §4.7).
 //
-// Pagination strategy: order by (occurred_at DESC, id DESC). Cursor encodes
-// `<iso>|<id>`, base64url-encoded, so the client cannot easily forge cursors
-// pointing at out-of-page rows.
+// Pagination strategy (owner directive 2026-06-05): true page-based pagination
+// with a total count so the UI can render "Showing X–Y of Z" + a page-size
+// selector. All filters moved server-side so the total/page math is accurate.
+//   * order by (occurred_at DESC, id DESC)
+//   * LIMIT <limit> OFFSET (page-1)*<limit>
+//   * a SEPARATE COUNT(*) over the SAME scope+filters yields `total`
 //
 // RBAC (owner directive 2026-05-21):
-//   * org `owner` / `admin` → all events in their org
+//   * org `owner` / `admin` / `auditor` → all events in their org
 //   * everyone else (member / guest) → 403 forbidden. The audit log is an
-//     admin-only surface; roles below admin must not see it at all (this is a
-//     deliberate tightening of the previous "self-scoped" view, which let
-//     members read their own rows).
+//     admin-only surface; roles below admin must not see it at all.
 // ---------------------------------------------------------------------------
 
 const querySchema = z.object({
-  cursor: z.string().optional(),
+  page: z.coerce.number().int().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
-  actor: z.string().uuid().optional(),
   action: z.string().min(1).max(120).optional(),
-  from: z
-    .string()
-    .datetime({ offset: true })
-    .optional(),
-  to: z
-    .string()
-    .datetime({ offset: true })
-    .optional(),
+  q: z.string().min(1).max(120).optional(),
+  from: z.string().datetime({ offset: true }).optional(),
+  to: z.string().datetime({ offset: true }).optional(),
+  // `actor` is REPEATABLE — read raw via c.req.queries('actor') and uuid-checked
+  // per value in the handler. Declared permissively here (string OR string[]) so
+  // the query validator doesn't reject a repeated key before we get to validate.
+  actor: z.union([z.string(), z.array(z.string())]).optional(),
 });
 
-interface Cursor {
-  occurredAt: string;
-  id: string;
-}
+const DEFAULT_LIMIT = 25;
 
-function encodeCursor(c: Cursor): string {
-  return Buffer.from(`${c.occurredAt}|${c.id}`, "utf8").toString("base64url");
-}
-
-function decodeCursor(s: string): Cursor | null {
-  try {
-    const raw = Buffer.from(s, "base64url").toString("utf8");
-    const [occurredAt, id] = raw.split("|");
-    if (!occurredAt || !id) return null;
-    // Sanity-check the embedded date so a bogus cursor surfaces as 400.
-    if (Number.isNaN(Date.parse(occurredAt))) return null;
-    return { occurredAt, id };
-  } catch {
-    return null;
-  }
+// Escape LIKE wildcards so user-supplied `q` is matched LITERALLY. Postgres
+// ILIKE treats `%` and `_` as wildcards; without escaping, a query like `%`
+// would match every row. We escape the escape char first, then the wildcards,
+// and pair it with an explicit ESCAPE clause via Drizzle's `ilike`.
+function escapeLike(input: string): string {
+  return input.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
 export const auditRoutes = new Hono<{ Variables: AuthVariables }>()
@@ -121,14 +110,25 @@ export const auditRoutes = new Hono<{ Variables: AuthVariables }>()
       throw errors.forbidden("Audit log access is restricted to workspace admins");
     }
 
-    const limit = q.limit ?? 50;
+    const page = q.page ?? 1;
+    const limit = q.limit ?? DEFAULT_LIMIT;
+    const offset = (page - 1) * limit;
+
+    // REPEATABLE actor filter. queries() returns ALL values for the key (and an
+    // array of one for a single `?actor=...`). Validate each as a uuid; a bad
+    // value is a 400 (matches the single-value contract). De-dupe defensively.
+    const rawActors = c.req.queries("actor") ?? [];
+    const actorIds = [...new Set(rawActors)];
+    for (const a of actorIds) {
+      if (!z.string().uuid().safeParse(a).success) {
+        throw errors.validation("Invalid actor filter (must be a uuid)");
+      }
+    }
 
     // Scope = this org's events PLUS account-level events that are written
     // without an orgId (sign-in/out, 2FA, vault-unlock, recovery, etc.) whose
     // actor is a member of this org — so admins actually see authentication +
-    // unlock activity in the workspace audit log. Account events carry no
-    // org-specific data, so surfacing a member's own auth action to their org's
-    // admins is appropriate (a member in multiple orgs has it shown in each).
+    // unlock activity in the workspace audit log.
     const orgMemberIds = db
       .select({ userId: orgMembers.userId })
       .from(orgMembers)
@@ -140,45 +140,88 @@ export const auditRoutes = new Hono<{ Variables: AuthVariables }>()
     );
     if (scope) conds.push(scope);
 
-    if (q.actor) conds.push(eq(auditEvents.actorUserId, q.actor));
+    if (actorIds.length > 0) conds.push(inArray(auditEvents.actorUserId, actorIds));
     if (q.action) conds.push(eq(auditEvents.action, q.action));
     if (q.from) conds.push(gte(auditEvents.occurredAt, new Date(q.from)));
     if (q.to) conds.push(lt(auditEvents.occurredAt, new Date(q.to)));
 
-    if (q.cursor) {
-      const cursor = decodeCursor(q.cursor);
-      if (!cursor) throw errors.validation("Invalid cursor");
-      // Keyset on (occurred_at DESC, id DESC):
-      //   WHERE occurred_at < cursor.occurredAt
-      //      OR (occurred_at = cursor.occurredAt AND id < cursor.id)
-      const cursorDate = new Date(cursor.occurredAt);
-      const keyset = or(
-        lt(auditEvents.occurredAt, cursorDate),
-        and(eq(auditEvents.occurredAt, cursorDate), sql`${auditEvents.id} < ${cursor.id}`),
+    if (q.q) {
+      // Case-insensitive partial match across actorEmail / action / targetName.
+      // Wildcards in user input are escaped (literal `%`/`_`) with an explicit
+      // ESCAPE clause so the filter can't be turned into a match-all.
+      const pattern = `%${escapeLike(q.q)}%`;
+      const escape = sql`'\\'`;
+      const search = or(
+        sql`${auditEvents.actorEmail} ILIKE ${pattern} ESCAPE ${escape}`,
+        sql`${auditEvents.action} ILIKE ${pattern} ESCAPE ${escape}`,
+        sql`${auditEvents.targetName} ILIKE ${pattern} ESCAPE ${escape}`,
       );
-      if (keyset) conds.push(keyset);
+      if (search) conds.push(search);
     }
 
-    const user = c.get("user")!;
+    const where = and(...conds);
+
+    // Total over the SAME scope+filters (NOT just the page).
+    const countRows = await db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(auditEvents)
+      .where(where);
+    const total = countRows[0]?.total ?? 0;
+
     const rows = await db
       .select()
       .from(auditEvents)
-      .where(and(...conds))
+      .where(where)
       .orderBy(desc(auditEvents.occurredAt), desc(auditEvents.id))
-      .limit(limit + 1);
+      .limit(limit)
+      .offset(offset);
 
-    let nextCursor: string | null = null;
-    let page = rows;
-    if (rows.length > limit) {
-      page = rows.slice(0, limit);
-      const last = page[page.length - 1]!;
-      nextCursor = encodeCursor({
-        occurredAt: last.occurredAt.toISOString(),
-        id: last.id,
-      });
+    return c.json({ events: rows.map(toAuditDto), total, page, limit });
+  })
+
+  // -------------------------------------------------------------------------
+  // GET /audit/actors — distinct actors in this org's audit scope, for the
+  // filter dropdown (so it's not limited to the currently-loaded page). Same
+  // RBAC + same scope as GET /audit.
+  // -------------------------------------------------------------------------
+  .get("/actors", async (c) => {
+    const current = await activeOrgForContext(c);
+    if (!current) throw errors.notFound("No workspace");
+
+    if (!canViewAllOrgAudit(current.role)) {
+      throw errors.forbidden("Audit log access is restricted to workspace admins");
     }
 
-    return c.json({ events: page.map(toAuditDto), nextCursor });
+    const orgMemberIds = db
+      .select({ userId: orgMembers.userId })
+      .from(orgMembers)
+      .where(eq(orgMembers.orgId, current.orgId));
+    const scope = or(
+      eq(auditEvents.orgId, current.orgId),
+      and(isNull(auditEvents.orgId), inArray(auditEvents.actorUserId, orgMemberIds)),
+    );
+
+    const rows = await db
+      .selectDistinct({
+        userId: auditEvents.actorUserId,
+        email: auditEvents.actorEmail,
+      })
+      .from(auditEvents)
+      .where(
+        and(
+          scope,
+          sql`${auditEvents.actorUserId} IS NOT NULL`,
+          sql`${auditEvents.actorEmail} IS NOT NULL`,
+        ),
+      )
+      .orderBy(asc(auditEvents.actorEmail))
+      .limit(500);
+
+    const actors = rows
+      .filter((r): r is { userId: string; email: string } => r.userId !== null && r.email !== null)
+      .map((r) => ({ userId: r.userId, email: r.email }));
+
+    return c.json({ actors });
   });
 
 export type AuditRoutes = typeof auditRoutes;

@@ -21,7 +21,10 @@ import {
   canViewWorkspaceSettings,
   canWriteVaultData,
 } from "@/lib/auth/permissions";
-import { searchItems, type SearchResult } from "@/lib/api/search";
+import type { SearchResult } from "@/lib/api/search";
+import { searchAllItems } from "@/lib/items-overlay";
+import { useVaultLock } from "@/components/vault-lock/lock-provider";
+import { Lock } from "lucide-react";
 
 import {
   CommandDialog,
@@ -50,6 +53,7 @@ export function CommandPalette({ open, onOpenChange }: Props) {
   const router = useRouter();
   const t = useT();
   const { vaults } = useVaults();
+  const { getVaultKey } = useVaultLock();
   const { me } = useAuth();
   // The active workspace search results are scoped to. When it changes (the
   // user switches workspace while the palette is open) we must re-run the
@@ -69,8 +73,18 @@ export function CommandPalette({ open, onOpenChange }: Props) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
+  // True when a v2 (ZK) vault was skipped during the search because it's locked
+  // — drives an "unlock to search encrypted vaults" hint so results aren't
+  // silently incomplete.
+  const [lockedHint, setLockedHint] = useState(false);
   // Tracks the in-flight request so a newer keystroke cancels the older one.
   const abortRef = useRef<AbortController | null>(null);
+
+  // Snapshot of {id} for the search orchestrator, plus a stable string key so
+  // the search effect re-runs only when the vault set actually changes (not on
+  // every render).
+  const searchVaults = vaults.map((v) => ({ id: v.id }));
+  const vaultsKey = searchVaults.map((v) => v.id).join(",");
 
   // Reset transient search state when the palette closes so the next open
   // starts clean (cmdk keeps the input value otherwise). Routed through the
@@ -83,6 +97,7 @@ export function CommandPalette({ open, onOpenChange }: Props) {
       setQuery("");
       setResults([]);
       setSearching(false);
+      setLockedHint(false);
     }
     onOpenChange(next);
   };
@@ -101,6 +116,7 @@ export function CommandPalette({ open, onOpenChange }: Props) {
       const clear = setTimeout(() => {
         setResults([]);
         setSearching(false);
+        setLockedHint(false);
       }, 0);
       return () => clearTimeout(clear);
     }
@@ -111,15 +127,24 @@ export function CommandPalette({ open, onOpenChange }: Props) {
     const timer = setTimeout(async () => {
       setSearching(true);
       try {
-        const found = await searchItems(q, { signal: controller.signal });
+        // Runs the ZK blind-index search across every unlocked vault. Locked
+        // vaults are skipped and reported via hadLockedZkVault.
+        const { results: found, hadLockedZkVault } = await searchAllItems(
+          q,
+          searchVaults,
+          getVaultKey,
+          controller.signal,
+        );
         if (controller.signal.aborted) return;
         setResults(found);
+        setLockedHint(hadLockedZkVault);
       } catch {
         if (controller.signal.aborted) return;
         // A 400 (q too long / malformed) or any other failure is swallowed
         // silently — degrade to "no results" rather than surfacing a crash or
         // error toast on a keystroke.
         setResults([]);
+        setLockedHint(false);
       } finally {
         if (!controller.signal.aborted) setSearching(false);
       }
@@ -128,8 +153,11 @@ export function CommandPalette({ open, onOpenChange }: Props) {
     return () => clearTimeout(timer);
     // `activeOrgId` is a dependency so switching workspace while the palette is
     // open re-runs the search (and the abort above clears the prior workspace's
-    // in-flight request), preventing a stale cross-workspace result.
-  }, [query, activeOrgId]);
+    // in-flight request), preventing a stale cross-workspace result. The vaults
+    // key re-runs the search if the set of v2 vaults (and their lock state via a
+    // fresh getVaultKey) changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, activeOrgId, vaultsKey, getVaultKey]);
 
   const go = (href: string) => {
     handleOpenChange(false);
@@ -190,6 +218,12 @@ export function CommandPalette({ open, onOpenChange }: Props) {
               {!searching && results.length === 0 && (
                 <div className="px-2 py-3 text-xs text-muted-foreground">
                   {t("cmd.no_items")}
+                </div>
+              )}
+              {!searching && lockedHint && (
+                <div className="flex items-center gap-1.5 px-2 py-2 text-[11px] text-amber-700 dark:text-amber-400">
+                  <Lock className="size-3 shrink-0" />
+                  {t("cmd.locked_zk_hint")}
                 </div>
               )}
               {results.map((item) => {
